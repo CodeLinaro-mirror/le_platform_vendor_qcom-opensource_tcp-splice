@@ -600,8 +600,8 @@ tcpsp_conn_getinfo(char *buffer, char **start, off_t offset, int length)
 static void tcpsp_conn_flush(void)
 {
 	int idx;
+	struct list_head *list;
 	struct tcpsp_conn *cp;
-	struct list_head *e, *nxt;
 
   flush_again:
 	for (idx=0; idx<TCPSP_CONN_TAB_SIZE; idx++) {
@@ -610,10 +610,11 @@ static void tcpsp_conn_flush(void)
 		 */
 		write_lock_bh(&tcpsp_conn_lock);
 
-		list_for_each_safe (e, nxt, &tcpsp_conn_tab1[idx]) {
-			cp = list_entry(e, struct tcpsp_conn, f_list);
+		list = &tcpsp_conn_tab1[idx];
+		while (!list_empty(list)) {
+			cp = list_entry(list->next, struct tcpsp_conn, f_list);
 
-			TCPSP_DBG(4, "delete spliced connection\n");
+			TCPSP_DBG(4, "delete the spliced connection\n");
 			if (del_timer(&cp->timer)) {
 				write_unlock(&tcpsp_conn_lock);
 				tcpsp_conn_expire_now(cp);
