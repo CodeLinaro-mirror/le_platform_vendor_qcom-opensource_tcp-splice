@@ -131,6 +131,7 @@ static struct tcpsp_sysctl_table tcpsp_table = {
 };
 
 
+#if 0
 static inline struct socket *socki_lookup(struct inode *inode)
 {
 	return &inode->u.socket_i;
@@ -160,6 +161,7 @@ static struct socket *sockfd_lookup(int fd, int *err)
 	}
 	return sock;
 }
+#endif
 
 static inline void sockfd_put(struct socket *sock)
 {

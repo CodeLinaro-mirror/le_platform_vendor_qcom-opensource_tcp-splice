@@ -445,13 +445,11 @@ static void tcpsp_conn_expire(unsigned long data)
 		atomic_dec(&tcpsp_conn_count);
 
 		kmem_cache_free(tcpsp_conn_cachep, cp);
-		goto expire_out;
+		return;
 	}
 
 	TCPSP_DBG(5, "delayed: refcnt-1=%d\n", atomic_read(&cp->refcnt)-1);
 	tcpsp_conn_put(cp);
-
-  expire_out:
 }
 
 
@@ -603,17 +601,16 @@ static void tcpsp_conn_flush(void)
 {
 	int idx;
 	struct tcpsp_conn *cp;
-	struct list_head *l,*e;
+	struct list_head *e, *nxt;
 
- flush_again:
+  flush_again:
 	for (idx=0; idx<TCPSP_CONN_TAB_SIZE; idx++) {
 		/*
 		 *  Lock is actually needed in this loop.
 		 */
 		write_lock(&tcpsp_conn_lock);
 
-		l = &tcpsp_conn_tab1[idx];
-		for (e=l->next; e!=l; e=e->next) {
+		list_for_each_safe (e, nxt, &tcpsp_conn_tab1[idx]) {
 			cp = list_entry(e, struct tcpsp_conn, f_list);
 			write_unlock(&tcpsp_conn_lock);
 			TCPSP_DBG(4, "del splicing connection\n");

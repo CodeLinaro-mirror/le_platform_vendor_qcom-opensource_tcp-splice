@@ -169,7 +169,9 @@ static unsigned int tcpsp_in(unsigned int hooknum,
 			tcpsp_conn_put(cp);
 			return NF_DROP;
 		}
+		break;
 	default:/* CHECKSUM_UNNECESSARY */
+		break;
 	}
 
 	if (th->doff*4 > sizeof(struct tcphdr))
