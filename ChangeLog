@@ -1,3 +1,9 @@
+TCP Splicing for Linux - Version 0.0.5 - December 1, 2002
+
+2003-12-01  Wensong Zhang  <wensong@linux-vs.org>
+
+	* tcpsp_conn.c: code tidy up.
+
 2003-11-13  Wensong Zhang  <wensong@linux-vs.org>
 
 	* tcpsp_conn.c (tcpsp_conn_flush): fixed to disable the bottom

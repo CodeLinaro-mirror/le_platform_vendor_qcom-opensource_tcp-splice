@@ -73,7 +73,7 @@ tcpsp_conn_hash_key(__u32 addr, __u16 port)
  *	Hashes tcpsp_conn in tcpsp_conn_tabs by <addr,port>.
  *	returns bool success.
  */
-int tcpsp_conn_hash(struct tcpsp_conn *cp)
+static int tcpsp_conn_hash(struct tcpsp_conn *cp)
 {
 	unsigned hash;
 
@@ -101,7 +101,7 @@ int tcpsp_conn_hash(struct tcpsp_conn *cp)
  *	UNhashes tcpsp_conn from tcpsp_conn_tabs.
  *	returns bool success.
  */
-int tcpsp_conn_unhash(struct tcpsp_conn *cp)
+static int tcpsp_conn_unhash(struct tcpsp_conn *cp)
 {
 	if (!(cp->flags & TCPSP_CONN_F_HASHED)) {
 		TCPSP_ERR("tcpsp_conn_unhash(): request for unhash flagged, "

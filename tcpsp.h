@@ -11,7 +11,7 @@
 
 #include <asm/types.h>          /* For __uXX types */
 
-#define TCPSP_VERSION_CODE            0x000002
+#define TCPSP_VERSION_CODE            0x000005
 #define NVERSION(version)                       \
 	(version >> 16) & 0xFF,                 \
 	(version >> 8) & 0xFF,                  \
