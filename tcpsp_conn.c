@@ -608,18 +608,19 @@ static void tcpsp_conn_flush(void)
 		/*
 		 *  Lock is actually needed in this loop.
 		 */
-		write_lock(&tcpsp_conn_lock);
+		write_lock_bh(&tcpsp_conn_lock);
 
 		list_for_each_safe (e, nxt, &tcpsp_conn_tab1[idx]) {
 			cp = list_entry(e, struct tcpsp_conn, f_list);
-			write_unlock(&tcpsp_conn_lock);
-			TCPSP_DBG(4, "del splicing connection\n");
-			if (del_timer(&cp->timer))
-				tcpsp_conn_expire_now(cp);
 
-			write_lock(&tcpsp_conn_lock);
+			TCPSP_DBG(4, "delete spliced connection\n");
+			if (del_timer(&cp->timer)) {
+				write_unlock(&tcpsp_conn_lock);
+				tcpsp_conn_expire_now(cp);
+				write_lock(&tcpsp_conn_lock);
+			}
 		}
-		write_unlock(&tcpsp_conn_lock);
+		write_unlock_bh(&tcpsp_conn_lock);
 	}
 
 	/* the counter may be not NULL, because maybe some conn entries

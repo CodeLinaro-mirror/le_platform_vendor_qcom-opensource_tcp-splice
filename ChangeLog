@@ -1,3 +1,10 @@
+2003-11-13  Wensong Zhang  <wensong@linux-vs.org>
+
+	* tcpsp_conn.c (tcpsp_conn_flush): fixed to disable the bottom
+	half and hold lock while deleting the timer. Thank Runhua Yang
+	<yangrunhua@njupt.edu.cn> for the suggestion and patch.
+
+
 TCP Splicing for Linux - Version 0.0.4 - November 11, 2002
 
 2003-11-11  Wensong Zhang  <wensong@linux-vs.org>
