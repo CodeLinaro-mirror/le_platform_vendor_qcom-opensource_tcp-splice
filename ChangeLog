@@ -1,3 +1,12 @@
+TCP Splicing for Linux - Version 0.0.4 - November 11, 2002
+
+2003-11-11  Wensong Zhang  <wensong@linux-vs.org>
+
+	* tcpsp_core.c (tcp_fast_parse_timestamps): Tharatorn Bidaya
+	<sorn@sfsu.edu> added the full-path parse for timestamps if the
+	fast parse doesn't work.
+
+
 TCP Splicing for Linux - Version 0.0.3 - October 27, 2002
 
 2003-10-27  Wensong Zhang  <wensong@linux-vs.org>
@@ -7,6 +16,7 @@ TCP Splicing for Linux - Version 0.0.3 - October 27, 2002
 
 	* tcpsp_conn.c (tcpsp_conn_flush): fixed to flush list entries
 	correctly. Thank Runhua Yang <yangrunhua@njupt.edu.cn>.
+
 
 TCP Splicing for Linux - Version 0.0.2 - May 20, 2002
 

@@ -66,6 +66,43 @@ static void tcpsp_reset_sock(struct sock *sk)
 	tcp_done(sk);
 }
 
+
+/* this function is modified from tcp_parse_option (tcp_input.c) */
+static void tcp_parse_timestamps(struct tcphdr *th, __u32 **ts_p)
+{
+	unsigned char *ptr;
+	int length = (th->doff*4) - sizeof(struct tcphdr);
+
+	ptr = (unsigned char *)(th + 1);
+
+	while (length > 0) {
+		int opcode = *ptr++;
+		int opsize;
+
+		switch (opcode) {
+		case TCPOPT_EOL:
+			return;
+		case TCPOPT_NOP:	/* Ref: RFC 793 section 3.1 */
+			length--;
+			continue;
+		default:
+			opsize = *ptr++;
+			if (opsize < 2) /* "silly options" */
+				return;
+			if (opsize > length)
+				return;	/* don't parse partial options */
+			switch(opcode) {
+			case TCPOPT_TIMESTAMP:
+				if(opsize == TCPOLEN_TIMESTAMP)
+					*ts_p = (__u32 *)ptr;
+				break;
+			};
+			ptr += opsize - 2;
+			length -= opsize;
+		};
+	}
+}
+
 /* it only parse timestamp locations*/
 static inline int
 tcp_fast_parse_timestamps(struct tcphdr *th, __u32 **ts_p)
@@ -87,7 +124,9 @@ tcp_fast_parse_timestamps(struct tcphdr *th, __u32 **ts_p)
 		}
 	}
 
-	/* should consider other situation later */
+	/* there is a chance that the fast parse doesn't work, then
+	   try slow parse for TCP timestamps */
+	tcp_parse_timestamps(th, ts_p);
 
 	return 0;
 }
