@@ -1,0 +1,250 @@
+/*
+ * tcpsp_core.c: main management and initialization routines
+ *
+ * Version:     $Id$
+ *
+ * Authors:     Wensong Zhang <wensong@linux-vs.org>
+ *
+ *              This program is free software; you can redistribute it and/or
+ *              modify it under the terms of the GNU General Public License
+ *              as published by the Free Software Foundation; either version
+ *              2 of the License, or (at your option) any later version.
+ *
+ * Changes:
+ *
+ */
+
+#include <linux/config.h>
+#include <linux/module.h>
+#include <linux/types.h>
+#include <linux/kernel.h>
+#include <linux/errno.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
+#include <linux/icmp.h>
+
+#include <net/ip.h>
+#include <net/tcp.h>
+#include <net/udp.h>
+#include <net/icmp.h>                   /* for icmp_send */
+#include <net/route.h>
+
+#include <linux/netfilter.h>
+#include <linux/netfilter_ipv4.h>
+
+#include "tcpsp.h"
+//#include <net/tcpsp.h>
+
+
+const char *tcpsp_proto_name(unsigned proto)
+{
+	static char buf[20];
+
+	switch (proto) {
+	case IPPROTO_IP:
+		return "IP";
+	case IPPROTO_UDP:
+		return "UDP";
+	case IPPROTO_TCP:
+		return "TCP";
+	case IPPROTO_ICMP:
+		return "ICMP";
+	default:
+		sprintf(buf, "IP_%d", proto);
+		return buf;
+	}
+}
+
+
+/*
+ *	Check if it's for tcp splicing connections
+ *	and send it on its way...
+ */
+static unsigned int tcpsp_in(unsigned int hooknum,
+			     struct sk_buff **skb_p,
+			     const struct net_device *in,
+			     const struct net_device *out,
+			     int (*okfn)(struct sk_buff *))
+{
+	struct sk_buff	*skb = *skb_p;
+	struct iphdr	*iph = skb->nh.iph;
+	struct tcphdr   *th;
+	struct tcpsp_conn *cp;
+	int ihl, datalen;
+	int direction;
+	struct conn_tuple *cin, *cout;
+	__u32 seq, ack_seq;
+	int rc;
+
+	/* ICMP handling will be considered later */
+	/*	if (iph->protocol == IPPROTO_ICMP) */
+	/*		return tcpsp_in_icmp(skb_p); */
+
+	/* let it go if other IP protocols */
+	if (iph->protocol != IPPROTO_TCP)
+		return NF_ACCEPT;
+
+	/* make sure that protocol header available in skb data area,
+	   note that skb data area may be reallocated. */
+	ihl = iph->ihl << 2;
+	if (!pskb_may_pull(skb, ihl+sizeof(struct tcphdr)))
+		return NF_DROP;
+	iph = skb->nh.iph;
+	datalen = skb->len - ihl;
+	th = (void *)iph + ihl;
+
+	/*
+	 * Check if the packet belongs to an existing connection entry
+	 */
+	cp = tcpsp_conn_get(iph->saddr, th->source,
+			    iph->daddr, th->dest, &direction);
+
+	if (!cp) {
+		/* sorry, all this trouble for a no-hit :) */
+		TCPSP_DBG(12, "packet for %s %d.%d.%d.%d:%d continue "
+			  "traversal as normal.\n",
+			  tcpsp_proto_name(iph->protocol),
+			  NIPQUAD(iph->daddr),
+			  ntohs(th->dest));
+		return NF_ACCEPT;
+	}
+
+	/* Add incremental checksum update later? */
+
+	/* full checksum check here now */
+	if (skb_is_nonlinear(skb)) {
+		if (skb_linearize(skb, GFP_ATOMIC) != 0) {
+			tcpsp_conn_put(cp);
+			return NF_DROP;
+		}
+		iph = skb->nh.iph;
+		th = (void *)iph + ihl;
+	}
+	switch (skb->ip_summed) {
+	case CHECKSUM_NONE:
+		skb->csum = csum_partial((void *)th, datalen, 0);
+	case CHECKSUM_HW:
+		if (csum_tcpudp_magic(iph->saddr, iph->daddr,
+				      datalen, IPPROTO_TCP, skb->csum)) {
+			TCPSP_DBG_RL("Incoming failed checksum "
+				     "from %d.%d.%d.%d (datalen=%d)!\n",
+				     NIPQUAD(iph->saddr), datalen);
+			tcpsp_conn_put(cp);
+			return NF_DROP;
+		}
+	default:/* CHECKSUM_UNNECESSARY */
+	}
+
+	if (th->doff*4 > sizeof(struct tcphdr))
+		TCPSP_DBG(7, "there is tcp option: doff %u > %u\n",
+			  th->doff*4, sizeof(struct tcphdr));
+
+	TCPSP_DBG(7, "Incoming %s %u.%u.%u.%u:%d->%u.%u.%u.%u:%d  "
+		  "seq %u ack %u len %d\n",
+		  tcpsp_proto_name(iph->protocol),
+		  NIPQUAD(iph->saddr), ntohs(th->source),
+		  NIPQUAD(iph->daddr), ntohs(th->dest),
+		  ntohl(th->seq), ntohl(th->ack_seq),
+		  datalen - th->doff*4);
+
+	tcpsp_set_state(cp, direction, iph, th);
+
+	cin = &cp->conn[direction];
+	cout = &cp->conn[!direction];
+
+	/* send first data ack packet from the server to the upper layer */
+	if (direction == 1 &&
+	    th->ack && datalen - th->doff*4 == 0 &&
+	    ntohl(th->seq) == cin->splice_irs &&
+	    ntohl(th->ack_seq) <= cin->splice_iss) {
+		TCPSP_DBG(7, "ack packet: seq %u == splice_irs %u and "
+			  "ack %u <= splice_iss %u, so let it go\n",
+			  ntohl(th->seq),cin->splice_irs,
+			  ntohl(th->ack_seq), cin->splice_iss);
+		tcpsp_conn_put(cp);
+		return NF_ACCEPT;
+	}
+
+	seq = cout->splice_iss + (ntohl(th->seq) - cin->splice_irs);
+	ack_seq = cout->splice_irs + (ntohl(th->ack_seq) - cin->splice_iss);
+
+	TCPSP_DBG(7, "Outgoing %s %u.%u.%u.%u:%d->%u.%u.%u.%u:%d  seq %u ack %u\n",
+		  tcpsp_proto_name(iph->protocol),
+		  NIPQUAD(cp->conn[!direction].laddr),
+		  ntohs(cp->conn[!direction].lport),
+		  NIPQUAD(cp->conn[!direction].raddr),
+		  ntohs(cp->conn[!direction].rport),
+		  seq, ack_seq);
+
+	iph->saddr = cout->laddr;
+	iph->daddr = cout->raddr;
+	th->source = cout->lport;
+	th->dest = cout->rport;
+	th->seq = htonl(seq);
+	th->ack_seq = htonl(ack_seq);
+	th->check = 0;
+	th->check = csum_tcpudp_magic(iph->saddr, iph->daddr,
+				      datalen, iph->protocol,
+				      csum_partial((char *)th, datalen, 0));
+	skb->ip_summed = CHECKSUM_UNNECESSARY;
+	ip_send_check(iph);
+
+	if (cp->packet_xmit)
+		rc = cp->packet_xmit(skb);
+	else
+		rc = NF_ACCEPT;
+
+	tcpsp_conn_put(cp);
+	return NF_STOLEN;
+}
+
+
+static struct nf_hook_ops tcpsp_in_ops = {
+	{ NULL, NULL },
+	tcpsp_in, PF_INET, NF_IP_LOCAL_IN, 100
+};
+
+
+static int __init tcpsp_init(void)
+{
+	int ret;
+
+	ret = tcpsp_control_init();
+	if (ret < 0) {
+		TCPSP_ERR("can't setup control.\n");
+		goto cleanup_nothing;
+	}
+
+	ret = tcpsp_conn_init();
+	if (ret < 0) {
+		TCPSP_ERR("can't setup connection table.\n");
+		goto cleanup_control;
+	}
+	ret = nf_register_hook(&tcpsp_in_ops);
+	if (ret < 0) {
+		TCPSP_ERR("can't register in hook.\n");
+		goto cleanup_conn;
+	}
+
+	TCPSP_INFO("tcpsp loaded.\n");
+	return ret;
+
+  cleanup_conn:
+	tcpsp_conn_cleanup();
+  cleanup_control:
+	tcpsp_control_cleanup();
+  cleanup_nothing:
+	return ret;
+}
+
+static void __exit tcpsp_cleanup(void)
+{
+	nf_unregister_hook(&tcpsp_in_ops);
+	tcpsp_conn_cleanup();
+	tcpsp_control_cleanup();
+	TCPSP_INFO("tcpsp unloaded.\n");
+}
+
+module_init(tcpsp_init);
+module_exit(tcpsp_cleanup);
+MODULE_LICENSE("GPL");
