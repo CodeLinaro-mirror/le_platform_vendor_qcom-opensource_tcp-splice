@@ -454,28 +454,6 @@ static void tcpsp_conn_expire(unsigned long data)
   expire_out:
 }
 
-static void tcp_reset_timer(unsigned long data)
-{
-	struct sock *sk = (struct sock *)data;
-
-	TCPSP_DBG(5, "set sock ECONNRESET\n");
-	sk->err = ECONNRESET;
-	if (!sk->dead)
-		sk->error_report(sk);
-
-	tcp_done(sk);
-}
-
-static inline void
-tcpsp_add_reset_timer(struct timer_list *timer, struct sock *sk,
-		      unsigned long when)
-{
-	init_timer(timer);
-	timer->function = tcp_reset_timer;
-	timer->data = (unsigned long) sk;
-	timer->expires = jiffies + when;
-	add_timer(timer);
-}
 
 static inline void fill_conn_tuple(struct conn_tuple *t, struct sock *sk)
 {
@@ -488,6 +466,10 @@ static inline void fill_conn_tuple(struct conn_tuple *t, struct sock *sk)
 
 	t->splice_iss = tp->snd_nxt;
 	t->splice_irs = tp->rcv_nxt;
+
+	t->splice_tsv = tp->rcv_tsval;
+	t->splice_tse = tp->rcv_tsecr;
+	t->timestamp_ok = tp->tstamp_ok;
 }
 
 /*
@@ -511,6 +493,10 @@ tcpsp_conn_new(struct socket *sock1, struct socket *sock2, int n)
 	cp->timer.data = (unsigned long) cp;
 	cp->timer.function = tcpsp_conn_expire;
 	tcpsp_timeout_attach(cp, &tcpsp_timeout_tbl);
+
+	cp->socket[0] = sock1;
+	cp->socket[1] = sock2;
+	atomic_set(&cp->need_rst, 1);
 
 	fill_conn_tuple(&cp->conn[0], sock1->sk);
 	fill_conn_tuple(&cp->conn[1], sock2->sk);
@@ -542,12 +528,6 @@ tcpsp_conn_new(struct socket *sock1, struct socket *sock2, int n)
 		  tp2->rcv_nxt, tp2->snd_nxt, tp2->snd_una);
 	TCPSP_DBG(5, "sock2: iss %u  irs %u\n",
 		  cp->conn[1].splice_iss, cp->conn[1].splice_irs);
-
-	tcp_reset_timer((unsigned long)sock1->sk);
-#if 0
-	/* give the user-space program a second to send data */
-	tcpsp_add_reset_timer(&cp->rst_timer[1], sock2->sk, HZ);
-#endif
 
 	return cp;
 }

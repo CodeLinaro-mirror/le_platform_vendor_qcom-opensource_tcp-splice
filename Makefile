@@ -1,7 +1,7 @@
 # tcpsf:  tcp splicing module for the Linux kernel
 
 NAME	= tcpsp
-VERSION = 0.0.1
+VERSION = 0.0.2
 
 # uncomment the following line on an SMP system
 #SMPFLAGS= -D__SMP__

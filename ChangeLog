@@ -1,4 +1,18 @@
+TCP Splicing for Linux - Version 0.0.2 - May 20, 2002
+
+2002-05-20  Wensong Zhang  <wensong@linux-vs.org>
+
+	* tcpsp_core.c (tcp_fast_parse_timestamps): added to simply parse
+	the timestamp location.
+
+	* tcpsp_core.c (tcpsp_in): changed to adapt the timestamp option
+	if it is presented.
+
+2002-05-19  Wensong Zhang  <wensong@linux-vs.org>
+
+	* tcpsp_core.c (tcpsp_in): changed to reset two sockets after the
+	first data ack is received from the server.
+
 2002-04-18  Wensong Zhang  <wensong@linux-vs.org>
 
 	* initial release
-

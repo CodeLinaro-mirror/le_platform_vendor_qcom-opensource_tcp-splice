@@ -56,6 +56,42 @@ const char *tcpsp_proto_name(unsigned proto)
 }
 
 
+static void tcpsp_reset_sock(struct sock *sk)
+{
+	TCPSP_DBG(7, "set sock ECONNRESET\n");
+	sk->err = ECONNRESET;
+	if (!sk->dead)
+		sk->error_report(sk);
+
+	tcp_done(sk);
+}
+
+/* it only parse timestamp locations*/
+static inline int
+tcp_fast_parse_timestamps(struct tcphdr *th, __u32 **ts_p)
+{
+	if (th->doff == sizeof(struct tcphdr)>>2) {
+		return 0;
+	}
+
+	if (th->doff ==
+	    (sizeof(struct tcphdr)>>2)+(TCPOLEN_TSTAMP_ALIGNED>>2)) {
+		__u32 *ptr = (__u32 *)(th + 1);
+		if (*ptr == __constant_ntohl((TCPOPT_NOP << 24) |
+					     (TCPOPT_NOP << 16) |
+					     (TCPOPT_TIMESTAMP << 8) |
+					     TCPOLEN_TIMESTAMP)) {
+			++ptr;
+			*ts_p = ptr;
+			return 1;
+		}
+	}
+
+	/* should consider other situation later */
+
+	return 0;
+}
+
 /*
  *	Check if it's for tcp splicing connections
  *	and send it on its way...
@@ -74,6 +110,7 @@ static unsigned int tcpsp_in(unsigned int hooknum,
 	int direction;
 	struct conn_tuple *cin, *cout;
 	__u32 seq, ack_seq;
+	__u32 *ts;
 	int rc;
 
 	/* ICMP handling will be considered later */
@@ -157,16 +194,39 @@ static unsigned int tcpsp_in(unsigned int hooknum,
 	    th->ack && datalen - th->doff*4 == 0 &&
 	    ntohl(th->seq) == cin->splice_irs &&
 	    ntohl(th->ack_seq) <= cin->splice_iss) {
-		TCPSP_DBG(7, "ack packet: seq %u == splice_irs %u and "
-			  "ack %u <= splice_iss %u, so let it go\n",
+		TCPSP_DBG(7, "ack packet: seq %u==splice_irs %u and "
+			  "ack %u<=splice_iss %u, so let it go\n",
 			  ntohl(th->seq),cin->splice_irs,
 			  ntohl(th->ack_seq), cin->splice_iss);
 		tcpsp_conn_put(cp);
 		return NF_ACCEPT;
 	}
 
+	if (direction == 1 &&
+	    ntohl(th->seq) == cin->splice_irs &&
+	    ntohl(th->ack_seq) >= cin->splice_iss &&
+	    atomic_dec_and_test(&cp->need_rst)) {
+		TCPSP_DBG(7, "data ack from server: seq %u==splice_irs %u and "
+			  "ack %u==splice_iss %u, then reset socks\n",
+			  ntohl(th->seq),cin->splice_irs,
+			  ntohl(th->ack_seq), cin->splice_iss);
+		tcpsp_reset_sock(cp->socket[0]->sk);
+		tcpsp_reset_sock(cp->socket[1]->sk);
+	}
+
+	/* compute sequences */
 	seq = cout->splice_iss + (ntohl(th->seq) - cin->splice_irs);
 	ack_seq = cout->splice_irs + (ntohl(th->ack_seq) - cin->splice_iss);
+
+	/* compute timestamps if presented */
+	if (cin->timestamp_ok && tcp_fast_parse_timestamps(th, &ts)) {
+		__u32 tsval, tsecho;
+
+		tsval = ntohl(ts[0]) - cin->splice_tsv + cout->splice_tse;
+		tsecho = ntohl(ts[1]) - cin->splice_tse + cout->splice_tsv;
+		ts[0] = htonl(tsval);
+		ts[1] = htonl(tsecho);
+	}
 
 	TCPSP_DBG(7, "Outgoing %s %u.%u.%u.%u:%d->%u.%u.%u.%u:%d  seq %u ack %u\n",
 		  tcpsp_proto_name(iph->protocol),

@@ -76,6 +76,7 @@ void start_forwarder(struct sockaddr_in *servaddr)
 	listenaddr.sin_addr.s_addr = htonl(INADDR_ANY);
 	listenaddr.sin_port = htons (8888);
 
+	flag = 1;
 	setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
 
 	if (bind(listenfd, (struct sockaddr *)&listenaddr,
@@ -88,7 +89,12 @@ void start_forwarder(struct sockaddr_in *servaddr)
 		exit(1);
 	}
 
+	cliaddrlen = sizeof(cliaddr);
 	fd1 = accept(listenfd, (struct sockaddr *)&cliaddr, &cliaddrlen);
+	if (fd1 == -1) {
+		printf("accept error.\n");
+		exit(1);
+	}
 
 	n = read(fd1, buf, len);
 	if (n < 0 && errno == ECONNRESET) {

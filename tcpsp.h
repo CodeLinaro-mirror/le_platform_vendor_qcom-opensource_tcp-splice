@@ -11,7 +11,7 @@
 
 #include <asm/types.h>          /* For __uXX types */
 
-#define TCPSP_VERSION_CODE            0x000001
+#define TCPSP_VERSION_CODE            0x000002
 #define NVERSION(version)                       \
 	(version >> 16) & 0xFF,                 \
 	(version >> 8) & 0xFF,                  \
@@ -156,11 +156,18 @@ struct conn_tuple {
 	__u16                   lport;
 	__u16                   rport;
 
+	/* sequence numbers at the spliced point */
 	__u32			splice_iss;	/* initial send sequence */
 	__u32			splice_irs;	/* initial receive sequence */
+
+	/* tcp timestamps at the spliced point*/
+	__u32			splice_tsv;	/* timestamp value */
+	__u32			splice_tse;	/* timestamp echo reply */
+	char			timestamp_ok;
 };
 
 
+/* direction definition */
 #define FROM_FIRST_CONN		0
 #define FROM_SECOND_CONN	1
 
@@ -172,17 +179,21 @@ struct tcpsp_conn {
 	struct list_head        s_list;		/* second hash table */
 
 	atomic_t                refcnt;		/* reference count */
-	struct timer_list       timer;		/* Expiration timer */
 
+	/* two sockets/connections */
+	struct socket		*socket[2];
+	atomic_t		need_rst;	/* need resetting socks */
 	struct conn_tuple	conn[2];	/* two spliced connections */
-	struct timer_list	rst_timer[2];	/* two tcp reset timer */
-	
+
 	/* Flags and state transition */
 	spinlock_t              lock;           /* lock for state transition */
 	volatile __u16          flags;          /* status flags */
 	volatile __u16          state;          /* state info */
-	volatile unsigned long  timeout;        /* timeout */
+
+	/* timeout */
+	volatile unsigned long  timeout;
 	struct tcpsp_timeout_table *timeout_table;
+	struct timer_list       timer;		/* expiration timer */
 
 	/* packet transmitter */
 	int (*packet_xmit)(struct sk_buff *skb);
