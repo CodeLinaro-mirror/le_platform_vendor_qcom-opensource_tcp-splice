@@ -94,7 +94,7 @@ void sendToUserspace(struct tcp_splice_hash_entry* hash_entry)
   }
 
   //allocate new skb, nlmsg_unicast takes care of the freeing
-  if((skb = nlmsg_new(sizeof(struct userspace_relay_session), GFP_KERNEL)) == NULL)
+  if((skb = nlmsg_new(sizeof(struct userspace_relay_session), GFP_ATOMIC)) == NULL)
   {
     pr_debug(MODULE_NAME": %s skb NULL!\n", __func__);
     return;
