@@ -224,7 +224,7 @@ __sum16 qti_tcp_v6_check(struct sk_buff* skb)
   }
 
   if((buffer = (unsigned short*)kzalloc(num_of_hextet *
-                sizeof(unsigned short), GFP_KERNEL)) == NULL)
+                sizeof(unsigned short), GFP_ATOMIC)) == NULL)
   {
     pr_debug(MODULE_NAME": %s couldn't kzalloc\n", __func__);
     return 0;
