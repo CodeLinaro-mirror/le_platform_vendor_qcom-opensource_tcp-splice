@@ -35,9 +35,9 @@
 //IPv6 hdr = 40 bytes, IPv4 hdr = 20 bytes w/ no options; 40 - 20 = 20
 #define IPV6_IPV4_HEADER_DIFF 20
 
-#define MAX_WINDOW_SIZE 0x0000ffff
+#define IPV4_HDR_LEN_BYTES(ihl) (ihl << 2)
 
-#define SAFE_REF_CNT 3
+#define MAX_WINDOW_SIZE 0x0000ffff
 
 #define CLI_DIRECTION 0
 #define REQ_DIRECTION 1

@@ -63,19 +63,19 @@ int qti_tcp_fast_parse_options(struct tcphdr* tcp_hdr, unsigned int** timestamp,
 
   if(NULL == tcp_hdr)
   {
-    pr_debug(MODULE_NAME": %s tcp_hdr NULL!\n", __func__);
+    pr_err(MODULE_NAME": %s tcp_hdr NULL!\n", __func__);
     return -EINVAL;
   } else if(NULL == timestamp)
   {
-    pr_debug(MODULE_NAME": %s timestamp NULL!\n", __func__);
+    pr_err(MODULE_NAME": %s timestamp NULL!\n", __func__);
     return -EINVAL;
   } else if(NULL == sacks)
   {
-    pr_debug(MODULE_NAME": %s sacks NULL!\n", __func__);
+    pr_err(MODULE_NAME": %s sacks NULL!\n", __func__);
     return -EINVAL;
   } else if(NULL == num_sacks)
   {
-    pr_debug(MODULE_NAME": %s num_sacks NULL!\n", __func__);
+    pr_err(MODULE_NAME": %s num_sacks NULL!\n", __func__);
     return -EINVAL;
   }
 
@@ -126,14 +126,14 @@ int qti_tcp_fast_parse_options(struct tcphdr* tcp_hdr, unsigned int** timestamp,
         opsize = *slow_ptr++;
         if(opsize < 2)
         {
-          pr_debug(MODULE_NAME": %s Recevied a bad TCP option size less than 2!\n",
+          pr_err(MODULE_NAME": %s Recevied a bad TCP option size less than 2!\n",
                 __func__);
           return -EINVAL;
         }
 
         if(opsize > length)
         {
-          pr_debug(MODULE_NAME": %s Recevied a bad TCP option size greater than length!\n",
+          pr_err(MODULE_NAME": %s Recevied a bad TCP option size greater than length!\n",
                  __func__);
           return -EINVAL;
         }
@@ -201,7 +201,7 @@ __sum16 qti_tcp_v6_check(struct sk_buff* skb)
 
   if(NULL == skb)
   {
-    pr_debug(MODULE_NAME": %s skb NULL!\n", __func__);
+    pr_err(MODULE_NAME": %s skb NULL!\n", __func__);
     return 0;
   }
 
@@ -210,7 +210,7 @@ __sum16 qti_tcp_v6_check(struct sk_buff* skb)
   //sanity check to prevent overflow
   if(ntohs(ip_hdr->payload_len) > (skb->len - sizeof(struct ipv6hdr)))
   {
-    pr_debug(MODULE_NAME": %s bad payload_len = %d\n", __func__, ntohs(ip_hdr->payload_len));
+    pr_err(MODULE_NAME": %s bad payload_len = %d\n", __func__, ntohs(ip_hdr->payload_len));
     return 0;
   }
 
@@ -226,7 +226,7 @@ __sum16 qti_tcp_v6_check(struct sk_buff* skb)
   if((buffer = (unsigned short*)kzalloc(num_of_hextet *
                 sizeof(unsigned short), GFP_ATOMIC)) == NULL)
   {
-    pr_debug(MODULE_NAME": %s couldn't kzalloc\n", __func__);
+    pr_err(MODULE_NAME": %s couldn't kzalloc\n", __func__);
     return 0;
   }
 
