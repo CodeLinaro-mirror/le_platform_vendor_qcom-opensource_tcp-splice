@@ -43,8 +43,6 @@ static struct nf_hook_ops fwd_hook_v4;
 static struct nf_hook_ops post_hook_v4;
 
 static struct nf_hook_ops pre_hook_v6;
-static struct nf_hook_ops fwd_hook_v6;
-static struct nf_hook_ops post_hook_v6;
 
 struct sock* nl_socket = NULL;
 struct sockaddr_nl userspace_addr;
@@ -74,8 +72,6 @@ static int __init tcp_splice_init(void)
   memset(&fwd_hook_v4, 0, sizeof(struct nf_hook_ops));
   memset(&post_hook_v4, 0, sizeof(struct nf_hook_ops));
   memset(&pre_hook_v6, 0, sizeof(struct nf_hook_ops));
-  memset(&fwd_hook_v6, 0, sizeof(struct nf_hook_ops));
-  memset(&post_hook_v6, 0, sizeof(struct nf_hook_ops));
   memset(&tcp_splice_sockopt_hook, 0, sizeof(struct nf_sockopt_ops));
   memset(&cfg, 0, sizeof(struct netlink_kernel_cfg));
   memset(&userspace_addr, 0, sizeof(struct sockaddr_nl));
@@ -147,35 +143,6 @@ static int __init tcp_splice_init(void)
     return -EINVAL;
   }
 
-  //fill out the nf_hook_ops struct
-  fwd_hook_v6.hook = (nf_hookfn*)forward_v6;
-  fwd_hook_v6.owner = THIS_MODULE;
-  fwd_hook_v6.pf = NFPROTO_IPV6; //match on IPV6 pkts
-  fwd_hook_v6.hooknum = NF_INET_FORWARD; //NF_INET_FORWARD
-  hook_priority = NF_IP_PRI_MANGLE; //specifying that we are MANGLE priority
-  fwd_hook_v6.priority = hook_priority;
-  if(nf_register_hook(&fwd_hook_v6) != 0)
-  {
-    pr_err(MODULE_NAME": error registering the fwd_hook_v6 callback\n");
-    netlink_kernel_release(nl_socket);
-    return -EINVAL;
-  }
-
-  //fill out the nf_hook_ops struct
-  post_hook_v6.hook = (nf_hookfn*)post_route_v6;
-  post_hook_v6.owner = THIS_MODULE;
-  post_hook_v6.pf = NFPROTO_IPV6; //match on IPV6 pkts
-  post_hook_v6.hooknum = NF_INET_POST_ROUTING; //NF_INET_POST_ROUTING
-  //hook_priority = NF_IP_PRI_NAT_SRC; //specifying that we are SNAT priority
-  hook_priority = NF_IP_PRI_LAST;
-  post_hook_v6.priority = hook_priority;
-  if(nf_register_hook(&post_hook_v6) != 0)
-  {
-    pr_err(MODULE_NAME": error registering the post_hook_v6 callback\n");
-    netlink_kernel_release(nl_socket);
-    return -EINVAL;
-  }
-
   pr_info(MODULE_NAME": netfilter hook callbacks registered...\n");
 
 
@@ -216,8 +183,6 @@ static void __exit tcp_splice_exit(void)
   nf_unregister_hook(&fwd_hook_v4);
   nf_unregister_hook(&post_hook_v4);
   nf_unregister_hook(&pre_hook_v6);
-  nf_unregister_hook(&fwd_hook_v6);
-  nf_unregister_hook(&post_hook_v6);
   nf_unregister_sockopt(&tcp_splice_sockopt_hook);
   netlink_kernel_release(nl_socket);
 
@@ -293,7 +258,7 @@ unsigned int pre_route_v4(unsigned int hooknum, struct sk_buff* skb, const struc
         }
         case AF_INET6: //IPv4 to IPv6
         {
-          pre_route_v4_to_v6(hash_entry->splice_tuple.req_daddr.v6_addr,
+          ip_splice_v4_to_v6(hash_entry->splice_tuple.req_daddr.v6_addr,
                              hash_entry->splice_tuple.req_saddr.v6_addr,
                              hash_entry->splice_tuple.req_dport,
                              hash_entry->splice_tuple.req_sk_num, skb);
@@ -325,7 +290,7 @@ unsigned int pre_route_v4(unsigned int hooknum, struct sk_buff* skb, const struc
         }
         case AF_INET6: //IPv4 to IPv6
         {
-          pre_route_v4_to_v6(hash_entry->splice_tuple.cli_daddr.v6_addr,
+          ip_splice_v4_to_v6(hash_entry->splice_tuple.cli_daddr.v6_addr,
                              hash_entry->splice_tuple.cli_saddr.v6_addr,
                              hash_entry->splice_tuple.cli_dport,
                              hash_entry->splice_tuple.cli_sk_num, skb);
@@ -408,9 +373,8 @@ unsigned int local_out_v4(struct sk_buff* skb)
       //for req
       mangle_tcp_splice(tcp_hdr, hash_entry, REQ_DIRECTION);
 
-      dst_release(skb_dst(skb)); //release old dst route
-      skb_dst_set(skb, hash_entry->splice_tuple.req_dst); //update with new dst route
-      atomic_inc_return(&(skb_dst(skb)->__refcnt));
+      //set new dst route
+      set_dst_route(skb, hash_entry, REQ_DIRECTION);
 
       //replace with actual source port
       tcp_hdr->source = hash_entry->splice_tuple.req_sk_num_ct;
@@ -420,9 +384,8 @@ unsigned int local_out_v4(struct sk_buff* skb)
       //for cli
       mangle_tcp_splice(tcp_hdr, hash_entry, CLI_DIRECTION);
 
-      dst_release(skb_dst(skb)); //release old dst route
-      skb_dst_set(skb, hash_entry->splice_tuple.cli_dst); //update with new dst route
-      atomic_inc_return(&(skb_dst(skb)->__refcnt));
+      //set new dst route
+      set_dst_route(skb, hash_entry, CLI_DIRECTION);
 
       //replace with actual source port
       tcp_hdr->source = hash_entry->splice_tuple.cli_sk_num_ct;
@@ -434,28 +397,13 @@ unsigned int local_out_v4(struct sk_buff* skb)
 
     //recompute L4 checksum
     tcp_hdr->check = 0x0000;
-    tcp_hdr->check = tcp_v4_check(skb->len - (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)), ip_hdr->saddr,
-                                  ip_hdr->daddr, csum_partial((unsigned char*)tcp_hdr,
+    tcp_hdr->check = tcp_v4_check(skb->len - (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)),
+                                  ip_hdr->saddr, ip_hdr->daddr,
+                                  csum_partial((unsigned char*)tcp_hdr,
                                   skb->len - (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)), 0));
 
-    //check if FIN or RST
-    if(tcp_hdr->fin || tcp_hdr->rst)
-    {
-      pr_debug(MODULE_NAME": received FIN or RST!\n");
-
-      if((TCP_SPLICE_HASH_BLOCK_MODE == hash_entry->session_info.state) ||
-         (TCP_SPLICE_HASH_INVALID == hash_entry->session_info.state))
-      {
-        pr_debug(MODULE_NAME": already handled this FIN or RST\n");
-
-      } else {
-
-        //have this session_info go into block mode
-        hash_entry->session_info.state = TCP_SPLICE_HASH_BLOCK_MODE;
-        tcp_splice_ht[hash_entry->opp_key].session_info.state = TCP_SPLICE_HASH_BLOCK_MODE;
-        sendToUserspace(hash_entry);
-      }
-    }
+    //check for fin or rst
+    check_for_fin_rst_tcp_splice(tcp_hdr, hash_entry);
 
     if(((struct nf_conn*)skb->nfct))
     {
@@ -604,11 +552,8 @@ unsigned int post_route_v4(unsigned int hooknum, struct sk_buff* skb, const stru
     //check direction
     if(tcp_hdr->source == hash_entry->splice_tuple.cli_dport)
     {
-      //change src IP
-      ip_hdr->saddr = hash_entry->splice_tuple.req_saddr.v4_addr;
-
-      //change src port
-      tcp_hdr->source = hash_entry->splice_tuple.req_sk_num_ct;
+      //change src IP, and src port
+      snat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, REQ_DIRECTION);
 
       //change dst port
       tcp_hdr->dest = hash_entry->splice_tuple.req_dport;
@@ -617,11 +562,8 @@ unsigned int post_route_v4(unsigned int hooknum, struct sk_buff* skb, const stru
 
     } else if(tcp_hdr->source == hash_entry->splice_tuple.req_dport)
     {
-      //change src IP
-      ip_hdr->saddr = hash_entry->splice_tuple.cli_saddr.v4_addr;
-
-      //change src port
-      tcp_hdr->source = hash_entry->splice_tuple.cli_sk_num_ct;
+      //change src IP, and src port
+      snat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, CLI_DIRECTION);
 
       //change dst port
       tcp_hdr->dest = hash_entry->splice_tuple.cli_dport;
@@ -643,24 +585,8 @@ unsigned int post_route_v4(unsigned int hooknum, struct sk_buff* skb, const stru
                                   ip_hdr->daddr, csum_partial((unsigned char*)tcp_hdr,
                                   skb->len - (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)), 0));
 
-    //check if FIN or RST
-    if(tcp_hdr->fin || tcp_hdr->rst)
-    {
-      pr_debug(MODULE_NAME": received FIN or RST!\n");
-
-      if((TCP_SPLICE_HASH_BLOCK_MODE == hash_entry->session_info.state) ||
-         (TCP_SPLICE_HASH_INVALID == hash_entry->session_info.state))
-      {
-        pr_debug(MODULE_NAME": already handled this FIN or RST\n");
-
-      } else {
-
-        //have this session_info go into block mode
-        hash_entry->session_info.state = TCP_SPLICE_HASH_BLOCK_MODE;
-        tcp_splice_ht[hash_entry->opp_key].session_info.state = TCP_SPLICE_HASH_BLOCK_MODE;
-        sendToUserspace(hash_entry);
-      }
-    }
+    //check for fin or rst
+    check_for_fin_rst_tcp_splice(tcp_hdr, hash_entry);
 
     return NF_ACCEPT; //pass pkt along its traversal
 }
@@ -727,20 +653,31 @@ unsigned int pre_route_v6(unsigned int hooknum, struct sk_buff* skb, const struc
       {
         case AF_INET: //IPv6 to IPv4
         {
-          pre_route_v6_to_v4(hash_entry->splice_tuple.req_daddr.v4_addr,
+          ip_splice_v6_to_v4(hash_entry->splice_tuple.req_daddr.v4_addr,
                              hash_entry->splice_tuple.req_saddr.v4_addr,
                              hash_entry->splice_tuple.req_dport,
                              hash_entry->splice_tuple.req_sk_num, skb);
           if(local_out_v4(skb))
           {
-            pr_debug(MODULE_NAME": %s, error with local_out_v4\n", __func__);
+            pr_err(MODULE_NAME": %s, error with local_out_v4\n", __func__);
           }
           return NF_STOLEN; //I'll make sure skb arrives to dev_queue_xmit
           break;
         }
         case AF_INET6:
         {
-          ip_hdr->daddr = hash_entry->splice_tuple.req_daddr.v6_addr;
+          //change dst IP and dst port
+          dnat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, REQ_DIRECTION);
+
+          //change tcp hdr
+          mangle_tcp_splice(tcp_hdr, hash_entry, REQ_DIRECTION);
+
+          //change src IP, and src port
+          snat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, REQ_DIRECTION);
+
+          //set new dst route
+          set_dst_route(skb, hash_entry, REQ_DIRECTION);
+
           break;
         }
         default:
@@ -749,6 +686,8 @@ unsigned int pre_route_v6(unsigned int hooknum, struct sk_buff* skb, const struc
           break;
         }
       }
+
+      goto checksum;
 
     } else if(tcp_hdr->source == hash_entry->splice_tuple.req_dport)
     {
@@ -757,20 +696,31 @@ unsigned int pre_route_v6(unsigned int hooknum, struct sk_buff* skb, const struc
       {
         case AF_INET: //IPv6 to IPv4
         {
-          pre_route_v6_to_v4(hash_entry->splice_tuple.cli_daddr.v4_addr,
+          ip_splice_v6_to_v4(hash_entry->splice_tuple.cli_daddr.v4_addr,
                              hash_entry->splice_tuple.cli_saddr.v4_addr,
                              hash_entry->splice_tuple.cli_dport,
                              hash_entry->splice_tuple.cli_sk_num, skb);
           if(local_out_v4(skb))
           {
-            pr_debug(MODULE_NAME": %s, error with local_out_v4\n", __func__);
+            pr_err(MODULE_NAME": %s, error with local_out_v4\n", __func__);
           }
           return NF_STOLEN; //I'll make sure skb arrives to dev_queue_xmit
           break;
         }
         case AF_INET6:
         {
-          ip_hdr->daddr = hash_entry->splice_tuple.cli_daddr.v6_addr;
+          //change dst IP and dst port
+          dnat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, CLI_DIRECTION);
+
+          //change tcp hdr
+          mangle_tcp_splice(tcp_hdr, hash_entry, CLI_DIRECTION);
+
+          //change src IP, and src port
+          snat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, CLI_DIRECTION);
+
+          //set new dst route
+          set_dst_route(skb, hash_entry, CLI_DIRECTION);
+
           break;
         }
         default:
@@ -779,10 +729,32 @@ unsigned int pre_route_v6(unsigned int hooknum, struct sk_buff* skb, const struc
           break;
         }
       }
+
+      goto checksum;
     }
   }
 
-  return NF_ACCEPT; //pass pkt along its traversal
+  return NF_ACCEPT;
+
+  checksum:
+
+    //recompute L4 checksum
+    skb->ip_summed = CHECKSUM_UNNECESSARY;
+    tcp_hdr->check = 0x000;
+    tcp_hdr->check = qti_tcp_v6_check(skb);
+
+    //check for fin or rst
+    check_for_fin_rst_tcp_splice(tcp_hdr, hash_entry);
+
+    if(NULL == skb_dst(skb))
+    {
+      pr_err(MODULE_NAME": skb_dst(skb) is NULL!\n");
+      kfree_skb(skb);
+      return -1;
+    }
+
+    ip6_local_out(skb);
+    return NF_STOLEN;
 }
 
 /***************************************************************************
@@ -833,9 +805,8 @@ unsigned int local_out_v6(struct sk_buff* skb)
       //for req
       mangle_tcp_splice(tcp_hdr, hash_entry, REQ_DIRECTION);
 
-      dst_release(skb_dst(skb)); //release old dst route
-      skb_dst_set(skb, hash_entry->splice_tuple.req_dst); //update with new dst route
-      atomic_inc_return(&(skb_dst(skb)->__refcnt));
+      //set new dst route
+      set_dst_route(skb, hash_entry, REQ_DIRECTION);
 
       //replace with actual source port
       tcp_hdr->source = hash_entry->splice_tuple.req_sk_num_ct;
@@ -845,9 +816,8 @@ unsigned int local_out_v6(struct sk_buff* skb)
       //for cli
       mangle_tcp_splice(tcp_hdr, hash_entry, CLI_DIRECTION);
 
-      dst_release(skb_dst(skb)); //release old dst route
-      skb_dst_set(skb, hash_entry->splice_tuple.cli_dst); //update with new dst route
-      atomic_inc_return(&(skb_dst(skb)->__refcnt));
+      //set new dst route
+      set_dst_route(skb, hash_entry, CLI_DIRECTION);
 
       //replace with actual source port
       tcp_hdr->source = hash_entry->splice_tuple.cli_sk_num_ct;
@@ -859,24 +829,8 @@ unsigned int local_out_v6(struct sk_buff* skb)
 
     tcp_hdr->check = qti_tcp_v6_check(skb);
 
-    //check if FIN or RST
-    if(tcp_hdr->fin || tcp_hdr->rst)
-    {
-      pr_debug(MODULE_NAME": received FIN or RST!\n");
-
-      if((TCP_SPLICE_HASH_BLOCK_MODE == hash_entry->session_info.state) ||
-         (TCP_SPLICE_HASH_INVALID == hash_entry->session_info.state))
-      {
-        pr_debug(MODULE_NAME": already handled this FIN or RST\n");
-
-      } else {
-
-        //have this session_info go into block mode
-        hash_entry->session_info.state = TCP_SPLICE_HASH_BLOCK_MODE;
-        tcp_splice_ht[hash_entry->opp_key].session_info.state = TCP_SPLICE_HASH_BLOCK_MODE;
-        sendToUserspace(hash_entry);
-      }
-    }
+    //check for fin or rst
+    check_for_fin_rst_tcp_splice(tcp_hdr, hash_entry);
   }
 
   if(NULL == skb_dst(skb))
@@ -891,192 +845,7 @@ unsigned int local_out_v6(struct sk_buff* skb)
 
 /***************************************************************************
 *
-* Function: forward_v6
-*
-* Description: callback for IPv6 skb in forward chain
-*
-* Parameters: unsigned int hooknum, //hook number
-*             struct sk_buff* skb, //the skb
-*             const struct net_device* in, //net_device the skb arrived ingress
-*             const struct net_device* out, //net_device the skb should egress
-*             int (*okfn)(struct sk_buff*), //fcn ptr to okfn after all hooks done processing
-*
-* Return: NF_DROP, discard the skb
-*         NF_ACCEPT, continue traversal in kernel network stack
-*         NF_STOLEN, do not continue traversal
-*         NF_QUEUE, queue skb for userspace
-*         NF_REPEAT, call this callback again
-*
-***************************************************************************/
-unsigned int forward_v6(unsigned int hooknum, struct sk_buff* skb, const struct net_device* in,
-                        const struct net_device* out, int (*okfn)(struct sk_buff*))
-{
-  struct ipv6hdr* ip_hdr = (struct ipv6hdr*)skb_network_header(skb); //get L3 info;
-  struct tcphdr* tcp_hdr;
-  struct tcp_splice_hash_entry* hash_entry;
-  unsigned int key;
-
-  //match on TCP, and IPv6 should already be matched on when registering
-  if(ip_hdr->nexthdr == IPPROTO_TCP)
-  {
-    //sanity check to prevent overflow
-    if((skb->data + sizeof(struct ipv6hdr)) >= skb->tail)
-    {
-      pr_err(MODULE_NAME": %s bad ip header\n", __func__);
-      return NF_DROP;
-    }
-
-    tcp_hdr = (struct tcphdr*)(skb->data + sizeof(struct ipv6hdr));
-
-    //lookup in hashtable
-    key = hash_32(ip_hdr->saddr.in6_u.u6_addr32[0] ^ tcp_hdr->source ^ tcp_hdr->dest,
-                  TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
-    hash_entry = &tcp_splice_ht[key];
-
-    if(TCP_SPLICE_HASH_SPLICE_MODE != hash_entry->session_info.state)
-    {
-      return NF_ACCEPT;
-    }
-
-    //check direction
-    if(tcp_hdr->source == hash_entry->splice_tuple.cli_dport)
-    {
-      //for req
-      mangle_tcp_splice(tcp_hdr, hash_entry, REQ_DIRECTION);
-      //don't need to compute checksum just yet, post_route will checksum
-
-    } else if(tcp_hdr->source == hash_entry->splice_tuple.req_dport)
-    {
-      //for cli
-      mangle_tcp_splice(tcp_hdr, hash_entry, CLI_DIRECTION);
-      //don't need to compute checksum just yet, post_route will checksum
-    }
-
-  }
-
-  return NF_ACCEPT; //pass pkt along its traversal
-
-}
-
-/***************************************************************************
-*
-* Function: post_route_v6
-*
-* Description: callback for IPv6 skb in postroute chain
-*
-* Parameters: unsigned int hooknum, //hook number
-*             struct sk_buff* skb, //the skb
-*             const struct net_device* in, //net_device the skb arrived ingress
-*             const struct net_device* out, //net_device the skb should egress
-*             int (*okfn)(struct sk_buff*), //fcn ptr to okfn after all hooks done processing
-*
-* Return: NF_DROP, discard the skb
-*         NF_ACCEPT, continue traversal in kernel network stack
-*         NF_STOLEN, do not continue traversal
-*         NF_QUEUE, queue skb for userspace
-*         NF_REPEAT, call this callback again
-*
-***************************************************************************/
-unsigned int post_route_v6(unsigned int hooknum, struct sk_buff* skb, const struct net_device* in,
-                            const struct net_device* out, int (*okfn)(struct sk_buff*))
-{
-  struct ipv6hdr* ip_hdr = (struct ipv6hdr*)skb_network_header(skb); //get L3 info;
-  struct tcphdr* tcp_hdr;
-  unsigned int key;
-  struct tcp_splice_hash_entry* hash_entry;
-
-  //match on TCP, and IPv6 should already be matched on when registering
-  if(ip_hdr->nexthdr == IPPROTO_TCP)
-  {
-    //sanity check to prevent overflow
-    if((skb->data + sizeof(struct ipv6hdr)) >= skb->tail)
-    {
-      pr_err(MODULE_NAME": %s bad ip header\n", __func__);
-      return NF_DROP;
-    }
-
-    tcp_hdr = (struct tcphdr*)(skb->data + sizeof(struct ipv6hdr));
-
-    //lookup in hashtable
-    key = hash_32(ip_hdr->saddr.in6_u.u6_addr32[0] ^ tcp_hdr->source ^ tcp_hdr->dest,
-                  TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
-    hash_entry = &tcp_splice_ht[key];
-
-    if(TCP_SPLICE_HASH_SPLICE_MODE != hash_entry->session_info.state)
-    {
-      //TCP session has already recieved a FIN or RST
-      if(TCP_SPLICE_HASH_BLOCK_MODE == hash_entry->session_info.state)
-      {
-        return NF_DROP;
-      }
-
-      return NF_ACCEPT;
-    }
-
-    //check direction
-    if(tcp_hdr->source == hash_entry->splice_tuple.cli_dport)
-    {
-      //change src IP
-      ip_hdr->saddr = hash_entry->splice_tuple.req_saddr.v6_addr;
-
-      //change src port
-      tcp_hdr->source = hash_entry->splice_tuple.req_sk_num_ct;
-
-      //change dst port
-      tcp_hdr->dest = hash_entry->splice_tuple.req_dport;
-
-      goto checksum;
-
-    } else if((tcp_hdr->source == hash_entry->splice_tuple.req_dport))
-    {
-      //change src IP
-      ip_hdr->saddr = hash_entry->splice_tuple.cli_saddr.v6_addr;
-
-      //change src port
-      tcp_hdr->source = hash_entry->splice_tuple.cli_sk_num_ct;
-
-      //change dst port
-      tcp_hdr->dest = hash_entry->splice_tuple.cli_dport;
-
-      goto checksum;
-    }
-  }
-
-  return NF_ACCEPT; //pass pkt along its traversal
-
-  checksum:
-    //recompute L4 checksum
-    skb->ip_summed = CHECKSUM_UNNECESSARY;
-    tcp_hdr->check = 0x000;
-    tcp_hdr->check = qti_tcp_v6_check(skb);
-
-    atomic_inc_return(&(skb_dst(skb)->__refcnt));
-
-    //check if FIN or RST
-    if(tcp_hdr->fin || tcp_hdr->rst)
-    {
-      pr_debug(MODULE_NAME": received FIN or RST!\n");
-
-      if((TCP_SPLICE_HASH_BLOCK_MODE == hash_entry->session_info.state) ||
-         (TCP_SPLICE_HASH_INVALID == hash_entry->session_info.state))
-      {
-        pr_debug(MODULE_NAME": already handled this FIN or RST\n");
-
-      } else {
-
-        //have this session_info go into block mode
-        hash_entry->session_info.state = TCP_SPLICE_HASH_BLOCK_MODE;
-        tcp_splice_ht[hash_entry->opp_key].session_info.state = TCP_SPLICE_HASH_BLOCK_MODE;
-        sendToUserspace(hash_entry);
-      }
-    }
-
-    return NF_ACCEPT; //pass pkt along its traversal
-}
-
-/***************************************************************************
-*
-* Function: pre_route_v4_to_v6
+* Function: ip_splice_v4_to_v6
 *
 * Description: splices a v4 skb into a v6 skb
 *
@@ -1089,7 +858,7 @@ unsigned int post_route_v6(unsigned int hooknum, struct sk_buff* skb, const stru
 * Return: none
 *
 ***************************************************************************/
-void pre_route_v4_to_v6(struct in6_addr v6_daddr, struct in6_addr v6_saddr,
+void ip_splice_v4_to_v6(struct in6_addr v6_daddr, struct in6_addr v6_saddr,
                         unsigned short dest_port, unsigned short src_port, struct sk_buff* skb)
 {
   struct ipv6hdr* ip6_hdr;
@@ -1156,7 +925,7 @@ void pre_route_v4_to_v6(struct in6_addr v6_daddr, struct in6_addr v6_saddr,
 
 /***************************************************************************
 *
-* Function: pre_route_v6_to_v4
+* Function: ip_splice_v6_to_v4
 *
 * Description: splices a v6 skb into a v4 skb
 *
@@ -1169,7 +938,7 @@ void pre_route_v4_to_v6(struct in6_addr v6_daddr, struct in6_addr v6_saddr,
 * Return: none
 *
 ***************************************************************************/
-void pre_route_v6_to_v4(unsigned int v4_daddr, unsigned int v4_saddr, unsigned short dest_port,
+void ip_splice_v6_to_v4(unsigned int v4_daddr, unsigned int v4_saddr, unsigned short dest_port,
                         unsigned short src_port, struct sk_buff* skb)
 {
   struct iphdr* ip_hdr;
@@ -1231,174 +1000,34 @@ void pre_route_v6_to_v4(unsigned int v4_daddr, unsigned int v4_saddr, unsigned s
 
 /***************************************************************************
 *
-* Function: mangle_tcp_splice
+* Function: check_for_fin_rst_tcp_splice
 *
-* Description: mangles tcp header for another tcp session
+* Description: checks tcp hdr for FIN or RST and notifies userspace
 *
-* Parameters: struct tcphdr* tcp_hdr, //the tcp header
-*             struct tcp_splice_hash_entry* hash_entry //splice session info hash entry
-*              int direction //indicates splice for CLI_DIRECTION or REQ_DIRECTION
+* Parameters:  struct tcphdr* tcp_hdr //the TCP hdr
+*              struct tcp_splice_hash_entry* hash_entry //splice session info hash entry
 *
 * Return: none
 *
-* Precondition: this is an inline fcn, so it is expected tcp_hdr and hash_entry
-*               are not NULL ptrs
-*
 ***************************************************************************/
-static inline void mangle_tcp_splice(struct tcphdr* tcp_hdr,
-                                     struct tcp_splice_hash_entry* hash_entry,
-                                     int direction)
+static void check_for_fin_rst_tcp_splice(struct tcphdr* tcp_hdr,
+                                         struct tcp_splice_hash_entry* hash_entry)
 {
-  //note: this is an inline fcn, so it is expected tcp_hdr and hash_entry are not NULL ptrs
-  unsigned int* timestamp;
-  unsigned int window_size;
-  unsigned char num_sacks;
-  unsigned char i;
-  struct tcp_sack_block* sacks;
-
-  //check direction intended for
-  switch(direction)
+  if(tcp_hdr->fin || tcp_hdr->rst)
   {
-    case(CLI_DIRECTION):
+    pr_debug(MODULE_NAME": received FIN or RST!\n");
+
+    if((TCP_SPLICE_HASH_BLOCK_MODE == hash_entry->session_info.state) ||
+       (TCP_SPLICE_HASH_INVALID == hash_entry->session_info.state))
     {
-      tcp_hdr->seq = htonl((ntohl(tcp_hdr->seq) - hash_entry->splice_tuple.req_irs) +
-                            hash_entry->splice_tuple.cli_iss);
-      tcp_hdr->ack_seq = htonl((ntohl(tcp_hdr->ack_seq) - hash_entry->splice_tuple.req_iss) +
-                                hash_entry->splice_tuple.cli_irs);
+      pr_debug(MODULE_NAME": already handled this FIN or RST\n");
 
-      //handle TCP options: timestamp and sack
-      if(hash_entry->session_info.rx_opt_timestamp_ok || hash_entry->session_info.rx_opt_sack_ok)
-      {
-        if(qti_tcp_fast_parse_options(tcp_hdr, &timestamp, &sacks, &num_sacks,
-                                      hash_entry->session_info.rx_opt_timestamp_ok,
-                                      hash_entry->session_info.rx_opt_sack_ok) == 0)
-        {
-          //are we splicing timestamps?
-          if((hash_entry->session_info.rx_opt_timestamp_ok) && (NULL != timestamp))
-          {
-            timestamp[0] = htonl((ntohl(timestamp[0]) -
-                                hash_entry->splice_tuple.tstamp_option.req_ircv_tsval) +
-                                hash_entry->splice_tuple.tstamp_option.cli_ircv_tsecr);
-            timestamp[1] = htonl((ntohl(timestamp[1]) -
-                                hash_entry->splice_tuple.tstamp_option.req_ircv_tsecr) +
-                                hash_entry->splice_tuple.tstamp_option.cli_ircv_tsval);
-          }
+    } else {
 
-          //are we splicing SACKs?
-          if((hash_entry->session_info.rx_opt_sack_ok) && (num_sacks > 0))
-          {
-            for(i = 0; i < num_sacks; i++)
-            {
-              sacks[i].start_seq = htonl((ntohl(sacks[i].start_seq) -
-                                          hash_entry->splice_tuple.req_iss) +
-                                          hash_entry->splice_tuple.cli_irs);
-              sacks[i].end_seq = htonl((ntohl(sacks[i].end_seq) -
-                                        hash_entry->splice_tuple.req_iss) +
-                                        hash_entry->splice_tuple.cli_irs);
-            }
-          }
-        }
-      }
-
-      //are we splicing window sizes?
-      if(hash_entry->session_info.rx_opt_wscale_ok)
-      {
-        window_size = ((unsigned int)ntohs(tcp_hdr->window)) <<
-                        hash_entry->splice_tuple.wscale_option.req_isnd_wscale;
-
-        //does client supporte window scaling?
-        if(hash_entry->session_info.rx_opt_wscale_ok & CLIENT_SUPPORTS_WINDOW_SCALING)
-        {
-          tcp_hdr->window = htons((unsigned short)(window_size >>
-                                hash_entry->splice_tuple.wscale_option.cli_ircv_wscale));
-        } else {
-
-          //check boundaries
-          if(window_size >= MAX_WINDOW_SIZE)
-          {
-            tcp_hdr->window = MAX_WINDOW_SIZE;
-          } else {
-            tcp_hdr->window = htons((unsigned short)window_size);
-          }
-
-        }
-
-      }
-      break;
-    }
-
-    case(REQ_DIRECTION):
-    {
-      tcp_hdr->seq = htonl((ntohl(tcp_hdr->seq) - hash_entry->splice_tuple.cli_irs) +
-                          hash_entry->splice_tuple.req_iss);
-      tcp_hdr->ack_seq = htonl((ntohl(tcp_hdr->ack_seq) - hash_entry->splice_tuple.cli_iss) +
-                          hash_entry->splice_tuple.req_irs);
-
-      //handle TCP options: timestamp and sack
-      if(hash_entry->session_info.rx_opt_timestamp_ok || hash_entry->session_info.rx_opt_sack_ok)
-      {
-        if(qti_tcp_fast_parse_options(tcp_hdr, &timestamp, &sacks, &num_sacks,
-                                      hash_entry->session_info.rx_opt_timestamp_ok,
-                                      hash_entry->session_info.rx_opt_sack_ok) == 0)
-        {
-          //are we splicing timestamps?
-          if((hash_entry->session_info.rx_opt_timestamp_ok) && (NULL != timestamp))
-          {
-            timestamp[0] = htonl((ntohl(timestamp[0]) -
-                                  hash_entry->splice_tuple.tstamp_option.cli_ircv_tsval) +
-                                  hash_entry->splice_tuple.tstamp_option.req_ircv_tsecr);
-            timestamp[1] = htonl((ntohl(timestamp[1]) -
-                                  hash_entry->splice_tuple.tstamp_option.cli_ircv_tsecr) +
-                                  hash_entry->splice_tuple.tstamp_option.req_ircv_tsval);
-          }
-
-          //are we splicing SACKs?
-          if((hash_entry->session_info.rx_opt_sack_ok) && (num_sacks > 0))
-          {
-            for(i = 0; i < num_sacks; i++)
-            {
-                  sacks[i].start_seq = htonl((ntohl(sacks[i].start_seq) -
-                                              hash_entry->splice_tuple.cli_iss) +
-                                              hash_entry->splice_tuple.req_irs);
-                  sacks[i].end_seq = htonl((ntohl(sacks[i].end_seq) -
-                                            hash_entry->splice_tuple.cli_iss) +
-                                            hash_entry->splice_tuple.req_irs);
-            }
-          }
-        }
-      }
-
-      //are we splicing window sizes?
-      if(hash_entry->session_info.rx_opt_wscale_ok)
-      {
-        window_size = ((unsigned int)ntohs(tcp_hdr->window)) <<
-                        hash_entry->splice_tuple.wscale_option.cli_isnd_wscale;
-
-        //does remote supporte window scaling?
-        if(hash_entry->session_info.rx_opt_wscale_ok & REMOTE_SUPPORTS_WINDOW_SCALING)
-        {
-          tcp_hdr->window = htons((unsigned short)(window_size >>
-                            hash_entry->splice_tuple.wscale_option.req_ircv_wscale));
-        } else {
-
-          //check boundaries
-          if(window_size >= MAX_WINDOW_SIZE)
-          {
-            tcp_hdr->window = MAX_WINDOW_SIZE;
-          } else {
-            tcp_hdr->window = htons((unsigned short)window_size);
-          }
-
-        }
-
-      }
-      break;
-    }
-
-    default:
-    {
-      pr_debug(MODULE_NAME": invalid direction: %d\n", direction);
-      break;
+      //have this session_info go into block mode
+      hash_entry->session_info.state = TCP_SPLICE_HASH_BLOCK_MODE;
+      tcp_splice_ht[hash_entry->opp_key].session_info.state = TCP_SPLICE_HASH_BLOCK_MODE;
+      sendToUserspace(hash_entry);
     }
   }
 
