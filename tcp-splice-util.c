@@ -323,7 +323,7 @@ void dnat_tcp_splice(void* iphdr, struct tcphdr* tcp_hdr, struct tcp_splice_hash
         }
         case AF_INET6:
         {
-          ip6_hdr = (struct ip6hdr*)iphdr;
+          ip6_hdr = (struct ipv6hdr*)iphdr;
           ip6_hdr->daddr = hash_entry->splice_tuple.cli_daddr.v6_addr;
           break;
         }
@@ -348,7 +348,7 @@ void dnat_tcp_splice(void* iphdr, struct tcphdr* tcp_hdr, struct tcp_splice_hash
         }
         case AF_INET6:
         {
-          ip6_hdr = (struct ip6hdr*)iphdr;
+          ip6_hdr = (struct ipv6hdr*)iphdr;
           ip6_hdr->daddr = hash_entry->splice_tuple.req_daddr.v6_addr;
           break;
         }
@@ -581,7 +581,7 @@ void snat_tcp_splice(void* iphdr, struct tcphdr* tcp_hdr, struct tcp_splice_hash
         }
         case AF_INET6:
         {
-          ip6_hdr = (struct ip6hdr*)iphdr;
+          ip6_hdr = (struct ipv6hdr*)iphdr;
           ip6_hdr->saddr = hash_entry->splice_tuple.cli_saddr.v6_addr;
           break;
         }
@@ -606,7 +606,7 @@ void snat_tcp_splice(void* iphdr, struct tcphdr* tcp_hdr, struct tcp_splice_hash
         }
         case AF_INET6:
         {
-          ip6_hdr = (struct ip6hdr*)iphdr;
+          ip6_hdr = (struct ipv6hdr*)iphdr;
           ip6_hdr->saddr = hash_entry->splice_tuple.req_saddr.v6_addr;
           break;
         }

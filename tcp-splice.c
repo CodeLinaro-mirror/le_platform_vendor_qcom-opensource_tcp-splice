@@ -46,7 +46,9 @@ static struct nf_hook_ops pre_hook_v6;
 
 struct sock* nl_socket = NULL;
 struct sockaddr_nl userspace_addr;
-struct tcp_splice_hash_entry tcp_splice_ht[TCP_SPLICE_HASH_SIZE];
+
+DEFINE_HASHTABLE(tcp_splice_ht, TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
+spinlock_t ht_lock;
 
 /***************************************************************************
 *
@@ -65,7 +67,9 @@ static int __init tcp_splice_init(void)
   struct netlink_kernel_cfg cfg;
   enum nf_ip_hook_priorities hook_priority;
 
-  memset(tcp_splice_ht, 0, sizeof(tcp_splice_ht));
+  spin_lock_init(&ht_lock);
+
+  hash_init(tcp_splice_ht);
 
   //necessary for the zeroing out of the struct list_head list member
   memset(&pre_hook_v4, 0, sizeof(struct nf_hook_ops));
@@ -75,7 +79,6 @@ static int __init tcp_splice_init(void)
   memset(&tcp_splice_sockopt_hook, 0, sizeof(struct nf_sockopt_ops));
   memset(&cfg, 0, sizeof(struct netlink_kernel_cfg));
   memset(&userspace_addr, 0, sizeof(struct sockaddr_nl));
-  memset(tcp_splice_ht, 0, sizeof(tcp_splice_ht));
 
   cfg.input = listenFromUserspace; //the callback
   if((nl_socket = netlink_kernel_create(&init_net, NETLINK_QC_SOCKSIFY, &cfg)) == 0)
@@ -177,6 +180,9 @@ static int __init tcp_splice_init(void)
 ***************************************************************************/
 static void __exit tcp_splice_exit(void)
 {
+  int i;
+  struct tcp_splice_hash_entry* hash_entry = NULL;
+
   pr_info(MODULE_NAME": cleaning up...\n");
 
   nf_unregister_hook(&pre_hook_v4);
@@ -185,6 +191,14 @@ static void __exit tcp_splice_exit(void)
   nf_unregister_hook(&pre_hook_v6);
   nf_unregister_sockopt(&tcp_splice_sockopt_hook);
   netlink_kernel_release(nl_socket);
+
+  rcu_read_lock();
+  hash_for_each_rcu(tcp_splice_ht, i, hash_entry, hash_node)
+  {
+    hash_del_rcu(&(hash_entry->hash_node));
+    kfree(hash_entry);
+  }
+  rcu_read_unlock();
 
   pr_info(MODULE_NAME": finished clean up...\n");
   return;
@@ -214,7 +228,6 @@ unsigned int pre_route_v4(unsigned int hooknum, struct sk_buff* skb, const struc
 {
   struct iphdr* ip_hdr = (struct iphdr*)skb_network_header(skb); //get L3 info;
   struct tcphdr* tcp_hdr;
-  unsigned int key;
   struct tcp_splice_hash_entry* hash_entry;
 
   //match on TCP, and IPv4 should already be matched on when registering
@@ -230,86 +243,84 @@ unsigned int pre_route_v4(unsigned int hooknum, struct sk_buff* skb, const struc
     tcp_hdr = (struct tcphdr*)(skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl))); //get L4 info
 
     //lookup in hashtable
-    key = hash_32(ip_hdr->saddr ^ tcp_hdr->source ^ tcp_hdr->dest,
-    TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
-    hash_entry = &tcp_splice_ht[key];
-
-    if(TCP_SPLICE_HASH_SPLICE_MODE != hash_entry->session_info.state)
+    rcu_read_lock();
+    hash_for_each_possible_rcu(tcp_splice_ht, hash_entry, hash_node,
+                               ip_hdr->saddr ^ tcp_hdr->source ^ tcp_hdr->dest)
     {
-      //TCP session has already recieved a FIN or RST
-      if(TCP_SPLICE_HASH_BLOCK_MODE == hash_entry->session_info.state)
+      //check direction
+      if(tcp_hdr->source == hash_entry->splice_tuple.cli_dport)
       {
-        return NF_DROP;
-      }
-
-      return NF_ACCEPT;
-    }
-
-    //check direction
-    if(tcp_hdr->source == hash_entry->splice_tuple.cli_dport)
-    {
-      //change dest IP
-      switch(hash_entry->splice_tuple.req_family)
-      {
-        case AF_INET:
+        //change dest IP
+        switch(hash_entry->splice_tuple.req_family)
         {
-          ip_hdr->daddr = hash_entry->splice_tuple.req_daddr.v4_addr;
-          break;
-        }
-        case AF_INET6: //IPv4 to IPv6
-        {
-          ip_splice_v4_to_v6(hash_entry->splice_tuple.req_daddr.v6_addr,
-                             hash_entry->splice_tuple.req_saddr.v6_addr,
-                             hash_entry->splice_tuple.req_dport,
-                             hash_entry->splice_tuple.req_sk_num, skb);
-          if(local_out_v6(skb))
+          case AF_INET:
           {
-            pr_err(MODULE_NAME": %s, error with local_out_v6\n", __func__);
+            ip_hdr->daddr = hash_entry->splice_tuple.req_daddr.v4_addr;
+            break;
           }
-          return NF_STOLEN;
-          break;
-        }
-        default:
-        {
-          return NF_DROP;
-          break;
-        }
-      }
-
-      goto checksum;
-
-    } else if(tcp_hdr->source == hash_entry->splice_tuple.req_dport)
-    {
-      //change dest IP
-      switch(hash_entry->splice_tuple.cli_family)
-      {
-        case AF_INET:
-        {
-          ip_hdr->daddr = hash_entry->splice_tuple.cli_daddr.v4_addr;
-          break;
-        }
-        case AF_INET6: //IPv4 to IPv6
-        {
-          ip_splice_v4_to_v6(hash_entry->splice_tuple.cli_daddr.v6_addr,
-                             hash_entry->splice_tuple.cli_saddr.v6_addr,
-                             hash_entry->splice_tuple.cli_dport,
-                             hash_entry->splice_tuple.cli_sk_num, skb);
-          if(local_out_v6(skb))
+          case AF_INET6: //IPv4 to IPv6
           {
-            pr_err(MODULE_NAME": %s, error with local_out_v6\n", __func__);
+            ip_splice_v4_to_v6(hash_entry->splice_tuple.req_daddr.v6_addr,
+                               hash_entry->splice_tuple.req_saddr.v6_addr,
+                               hash_entry->splice_tuple.req_dport,
+                               hash_entry->splice_tuple.req_sk_num, skb);
+            if(local_out_v6(skb))
+            {
+              pr_err(MODULE_NAME": %s, error with local_out_v6\n", __func__);
+            }
+            rcu_read_unlock();
+            return NF_STOLEN;
+            break;
           }
-          return NF_STOLEN;
-          break;
+          default:
+          {
+            rcu_read_unlock();
+            return NF_DROP;
+            break;
+          }
         }
-        default:
+
+        rcu_read_unlock();
+        goto checksum;
+
+      } else if(tcp_hdr->source == hash_entry->splice_tuple.req_dport)
+      {
+        //change dest IP
+        switch(hash_entry->splice_tuple.cli_family)
         {
-          return NF_DROP;
-          break;
+          case AF_INET:
+          {
+            ip_hdr->daddr = hash_entry->splice_tuple.cli_daddr.v4_addr;
+            break;
+          }
+          case AF_INET6: //IPv4 to IPv6
+          {
+            ip_splice_v4_to_v6(hash_entry->splice_tuple.cli_daddr.v6_addr,
+                               hash_entry->splice_tuple.cli_saddr.v6_addr,
+                               hash_entry->splice_tuple.cli_dport,
+                               hash_entry->splice_tuple.cli_sk_num, skb);
+            if(local_out_v6(skb))
+            {
+              pr_err(MODULE_NAME": %s, error with local_out_v6\n", __func__);
+            }
+            rcu_read_unlock();
+            return NF_STOLEN;
+            break;
+          }
+          default:
+          {
+            rcu_read_unlock();
+            return NF_DROP;
+            break;
+          }
         }
+
+        rcu_read_unlock();
+        goto checksum;
       }
 
-      goto checksum;
     }
+    rcu_read_unlock();
   }
 
   return NF_ACCEPT; //pass pkt along its traversal
@@ -340,7 +351,6 @@ unsigned int local_out_v4(struct sk_buff* skb)
 {
   struct iphdr* ip_hdr = (struct iphdr*)skb_network_header(skb); //get L3 info;
   struct tcphdr* tcp_hdr;
-  unsigned int key;
   struct tcp_splice_hash_entry* hash_entry;
 
   //match on TCP, and IPv4 should already be matched on when registering
@@ -357,38 +367,57 @@ unsigned int local_out_v4(struct sk_buff* skb)
     tcp_hdr = (struct tcphdr*)(skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl))); //get L4 info
 
     //lookup in hashtable
-    key = hash_32(ip_hdr->daddr ^ tcp_hdr->source ^ tcp_hdr->dest,
-    TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
-    hash_entry = &tcp_splice_ht[key];
-
-    if(TCP_SPLICE_HASH_SPLICE_MODE != hash_entry->session_info.state)
+    rcu_read_lock();
+    hash_for_each_possible_rcu(tcp_splice_ht, hash_entry, hash_node,
+                               ip_hdr->daddr ^ tcp_hdr->source ^ tcp_hdr->dest)
     {
+      //check direction
+      if(tcp_hdr->dest == hash_entry->splice_tuple.req_dport)
+      {
+        //for req
+        mangle_tcp_splice(tcp_hdr, hash_entry, REQ_DIRECTION);
+
+        //set new dst route
+        set_dst_route(skb, hash_entry, REQ_DIRECTION);
+
+        //replace with actual source port
+        tcp_hdr->source = hash_entry->splice_tuple.req_sk_num_ct;
+
+        //check for fin or rst
+        check_for_fin_rst_tcp_splice(tcp_hdr, hash_entry);
+
+      } else if(tcp_hdr->dest == hash_entry->splice_tuple.cli_dport)
+      {
+        //for cli
+        mangle_tcp_splice(tcp_hdr, hash_entry, CLI_DIRECTION);
+
+        //set new dst route
+        set_dst_route(skb, hash_entry, CLI_DIRECTION);
+
+        //replace with actual source port
+        tcp_hdr->source = hash_entry->splice_tuple.cli_sk_num_ct;
+
+        //check for fin or rst
+        check_for_fin_rst_tcp_splice(tcp_hdr, hash_entry);
+      }
+    }
+    rcu_read_unlock();
+
+    if(((struct nf_conn*)skb->nfct))
+    {
+      //tell conntrack we already NAT'ed
+      ((struct nf_conn*)skb->nfct)->status |= IPS_NAT_DONE_MASK;
+    } else {
+      pr_err(MODULE_NAME": skb->nfct is NULL!\n");
       kfree_skb(skb);
       return -1;
     }
 
-    //check direction
-    if(tcp_hdr->dest == hash_entry->splice_tuple.req_dport)
+    if(NULL == skb_dst(skb))
     {
-      //for req
-      mangle_tcp_splice(tcp_hdr, hash_entry, REQ_DIRECTION);
-
-      //set new dst route
-      set_dst_route(skb, hash_entry, REQ_DIRECTION);
-
-      //replace with actual source port
-      tcp_hdr->source = hash_entry->splice_tuple.req_sk_num_ct;
-
-    } else if(tcp_hdr->dest == hash_entry->splice_tuple.cli_dport)
-    {
-      //for cli
-      mangle_tcp_splice(tcp_hdr, hash_entry, CLI_DIRECTION);
-
-      //set new dst route
-      set_dst_route(skb, hash_entry, CLI_DIRECTION);
-
-      //replace with actual source port
-      tcp_hdr->source = hash_entry->splice_tuple.cli_sk_num_ct;
+      pr_err(MODULE_NAME": skb_dst(skb) is NULL!\n");
+      kfree_skb(skb);
+      return -1;
     }
 
     //recompute L3 checksum
@@ -401,26 +430,6 @@ unsigned int local_out_v4(struct sk_buff* skb)
                                   ip_hdr->saddr, ip_hdr->daddr,
                                   csum_partial((unsigned char*)tcp_hdr,
                                   skb->len - (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)), 0));
-
-    //check for fin or rst
-    check_for_fin_rst_tcp_splice(tcp_hdr, hash_entry);
-
-    if(((struct nf_conn*)skb->nfct))
-    {
-      //tell conntrack we already NAT'ed
-      ((struct nf_conn*)skb->nfct)->status |= IPS_NAT_DONE_MASK;
-    } else {
-      pr_err(MODULE_NAME": skb->nfct is NULL!\n");
-      kfree_skb(skb);
-      return -1;
-    }
-  }
-
-  if(NULL == skb_dst(skb))
-  {
-    pr_err(MODULE_NAME": skb_dst(skb) is NULL!\n");
-    kfree_skb(skb);
-    return -1;
   }
 
   return ip_local_out(skb); //pass pkt along its traversal
@@ -451,7 +460,6 @@ unsigned int forward_v4(unsigned int hooknum, struct sk_buff* skb, const struct 
   struct iphdr* ip_hdr = (struct iphdr*)skb_network_header(skb); //get L3 info;
   struct tcphdr* tcp_hdr;
   struct tcp_splice_hash_entry* hash_entry;
-  unsigned int key;
 
   //match on TCP, and IPv4 should already be matched on when registering
   if(ip_hdr->protocol == IPPROTO_TCP)
@@ -466,28 +474,25 @@ unsigned int forward_v4(unsigned int hooknum, struct sk_buff* skb, const struct 
     tcp_hdr = (struct tcphdr*)(skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)));
 
     //lookup in hashtable
-    key = hash_32(ip_hdr->saddr ^ tcp_hdr->source ^ tcp_hdr->dest,
-                  TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
-    hash_entry = &tcp_splice_ht[key];
-
-    if(TCP_SPLICE_HASH_SPLICE_MODE != hash_entry->session_info.state)
+    rcu_read_lock();
+    hash_for_each_possible_rcu(tcp_splice_ht, hash_entry, hash_node,
+                               ip_hdr->saddr ^ tcp_hdr->source ^ tcp_hdr->dest)
     {
-      return NF_ACCEPT;
+      //check direction
+      if(tcp_hdr->source == hash_entry->splice_tuple.cli_dport)
+      {
+        //for req
+        mangle_tcp_splice(tcp_hdr, hash_entry, REQ_DIRECTION);
+        //don't need to compute checksum just yet, post_route will checksum
+
+      } else if(tcp_hdr->source == hash_entry->splice_tuple.req_dport)
+      {
+        //for cli
+        mangle_tcp_splice(tcp_hdr, hash_entry, CLI_DIRECTION);
+        //don't need to compute checksum just yet, post_route will checksum
+      }
     }
-
-    //check direction
-    if(tcp_hdr->source == hash_entry->splice_tuple.cli_dport)
-    {
-      //for req
-      mangle_tcp_splice(tcp_hdr, hash_entry, REQ_DIRECTION);
-      //don't need to compute checksum just yet, post_route will checksum
-
-    } else if(tcp_hdr->source == hash_entry->splice_tuple.req_dport)
-    {
-      //for cli
-      mangle_tcp_splice(tcp_hdr, hash_entry, CLI_DIRECTION);
-      //don't need to compute checksum just yet, post_route will checksum
-    }
+    rcu_read_unlock();
   }
 
   return NF_ACCEPT; //pass pkt along its traversal
@@ -518,7 +523,6 @@ unsigned int post_route_v4(unsigned int hooknum, struct sk_buff* skb, const stru
 {
   struct iphdr* ip_hdr = (struct iphdr*)skb_network_header(skb); //get L3 info;
   struct tcphdr* tcp_hdr;
-  unsigned int key;
   struct tcp_splice_hash_entry* hash_entry;
 
   //match on TCP, and IPv4 should already be matched on when registering
@@ -534,42 +538,35 @@ unsigned int post_route_v4(unsigned int hooknum, struct sk_buff* skb, const stru
     tcp_hdr = (struct tcphdr*)(skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)));
 
     //lookup in hashtable
-    key = hash_32(ip_hdr->saddr ^ tcp_hdr->source ^ tcp_hdr->dest,
-                  TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
-    hash_entry = &tcp_splice_ht[key];
-
-    if(TCP_SPLICE_HASH_SPLICE_MODE != hash_entry->session_info.state)
+    rcu_read_lock();
+    hash_for_each_possible_rcu(tcp_splice_ht, hash_entry, hash_node,
+                               ip_hdr->saddr ^ tcp_hdr->source ^ tcp_hdr->dest)
     {
-      //TCP session has already recieved a FIN or RST
-      if(TCP_SPLICE_HASH_BLOCK_MODE == hash_entry->session_info.state)
+      //check direction
+      if(tcp_hdr->source == hash_entry->splice_tuple.cli_dport)
       {
-        return NF_DROP;
+        //change src IP, and src port
+        snat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, REQ_DIRECTION);
+
+        //change dst port
+        tcp_hdr->dest = hash_entry->splice_tuple.req_dport;
+
+        rcu_read_unlock();
+        goto checksum;
+
+      } else if(tcp_hdr->source == hash_entry->splice_tuple.req_dport)
+      {
+        //change src IP, and src port
+        snat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, CLI_DIRECTION);
+
+        //change dst port
+        tcp_hdr->dest = hash_entry->splice_tuple.cli_dport;
+
+        rcu_read_unlock();
+        goto checksum;
       }
-
-      return NF_ACCEPT;
     }
-
-    //check direction
-    if(tcp_hdr->source == hash_entry->splice_tuple.cli_dport)
-    {
-      //change src IP, and src port
-      snat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, REQ_DIRECTION);
-
-      //change dst port
-      tcp_hdr->dest = hash_entry->splice_tuple.req_dport;
-
-      goto checksum;
-
-    } else if(tcp_hdr->source == hash_entry->splice_tuple.req_dport)
-    {
-      //change src IP, and src port
-      snat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, CLI_DIRECTION);
-
-      //change dst port
-      tcp_hdr->dest = hash_entry->splice_tuple.cli_dport;
-
-      goto checksum;
-    }
+    rcu_read_unlock();
   }
 
   return NF_ACCEPT; //pass pkt along its traversal
@@ -615,7 +612,6 @@ unsigned int pre_route_v6(unsigned int hooknum, struct sk_buff* skb, const struc
 {
   struct ipv6hdr* ip_hdr = (struct ipv6hdr*)skb_network_header(skb); //get L3 info;
   struct tcphdr* tcp_hdr;
-  unsigned int key;
   struct tcp_splice_hash_entry* hash_entry;
 
   //match on TCP, and IPv6 should already be matched on when registering
@@ -631,107 +627,106 @@ unsigned int pre_route_v6(unsigned int hooknum, struct sk_buff* skb, const struc
     tcp_hdr = (struct tcphdr*)(skb->data + sizeof(struct ipv6hdr));
 
     //lookup in hashtable
-    key = hash_32(ip_hdr->saddr.in6_u.u6_addr32[0] ^ tcp_hdr->source ^ tcp_hdr->dest,
-                  TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
-    hash_entry = &tcp_splice_ht[key];
-
-    if(TCP_SPLICE_HASH_SPLICE_MODE != hash_entry->session_info.state)
+    rcu_read_lock();
+    hash_for_each_possible_rcu(tcp_splice_ht, hash_entry, hash_node,
+                               ip_hdr->saddr.in6_u.u6_addr32[0] ^ tcp_hdr->source ^ tcp_hdr->dest)
     {
-      //TCP session has already recieved a FIN or RST
-      if(TCP_SPLICE_HASH_BLOCK_MODE == hash_entry->session_info.state)
+      //check direction
+      if((tcp_hdr->source == hash_entry->splice_tuple.cli_dport))
       {
-        return NF_DROP;
-      }
-      return NF_ACCEPT;
-    }
-
-    //check direction
-    if((tcp_hdr->source == hash_entry->splice_tuple.cli_dport))
-    {
-      //change dest IP, dest port
-      switch(hash_entry->splice_tuple.req_family)
-      {
-        case AF_INET: //IPv6 to IPv4
+        //change dest IP, dest port
+        switch(hash_entry->splice_tuple.req_family)
         {
-          ip_splice_v6_to_v4(hash_entry->splice_tuple.req_daddr.v4_addr,
-                             hash_entry->splice_tuple.req_saddr.v4_addr,
-                             hash_entry->splice_tuple.req_dport,
-                             hash_entry->splice_tuple.req_sk_num, skb);
-          if(local_out_v4(skb))
+          case AF_INET: //IPv6 to IPv4
           {
-            pr_err(MODULE_NAME": %s, error with local_out_v4\n", __func__);
+            ip_splice_v6_to_v4(hash_entry->splice_tuple.req_daddr.v4_addr,
+                               hash_entry->splice_tuple.req_saddr.v4_addr,
+                               hash_entry->splice_tuple.req_dport,
+                               hash_entry->splice_tuple.req_sk_num, skb);
+            if(local_out_v4(skb))
+            {
+              pr_err(MODULE_NAME": %s, error with local_out_v4\n", __func__);
+            }
+            rcu_read_unlock();
+            return NF_STOLEN; //I'll make sure skb arrives to dev_queue_xmit
+            break;
           }
-          return NF_STOLEN; //I'll make sure skb arrives to dev_queue_xmit
-          break;
-        }
-        case AF_INET6:
-        {
-          //change dst IP and dst port
-          dnat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, REQ_DIRECTION);
-
-          //change tcp hdr
-          mangle_tcp_splice(tcp_hdr, hash_entry, REQ_DIRECTION);
-
-          //change src IP, and src port
-          snat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, REQ_DIRECTION);
-
-          //set new dst route
-          set_dst_route(skb, hash_entry, REQ_DIRECTION);
-
-          break;
-        }
-        default:
-        {
-          return NF_DROP;
-          break;
-        }
-      }
-
-      goto checksum;
-
-    } else if(tcp_hdr->source == hash_entry->splice_tuple.req_dport)
-    {
-      //change dest IP, dest port
-      switch(hash_entry->splice_tuple.cli_family)
-      {
-        case AF_INET: //IPv6 to IPv4
-        {
-          ip_splice_v6_to_v4(hash_entry->splice_tuple.cli_daddr.v4_addr,
-                             hash_entry->splice_tuple.cli_saddr.v4_addr,
-                             hash_entry->splice_tuple.cli_dport,
-                             hash_entry->splice_tuple.cli_sk_num, skb);
-          if(local_out_v4(skb))
+          case AF_INET6:
           {
-            pr_err(MODULE_NAME": %s, error with local_out_v4\n", __func__);
+            //change dst IP and dst port
+            dnat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, REQ_DIRECTION);
+
+            //change tcp hdr
+            mangle_tcp_splice(tcp_hdr, hash_entry, REQ_DIRECTION);
+
+            //change src IP, and src port
+            snat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, REQ_DIRECTION);
+
+            //set new dst route
+            set_dst_route(skb, hash_entry, REQ_DIRECTION);
+
+            break;
           }
-          return NF_STOLEN; //I'll make sure skb arrives to dev_queue_xmit
-          break;
+          default:
+          {
+            rcu_read_unlock();
+            return NF_DROP;
+            break;
+          }
         }
-        case AF_INET6:
+
+        rcu_read_unlock();
+        goto checksum;
+
+      } else if(tcp_hdr->source == hash_entry->splice_tuple.req_dport)
+      {
+        //change dest IP, dest port
+        switch(hash_entry->splice_tuple.cli_family)
         {
-          //change dst IP and dst port
-          dnat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, CLI_DIRECTION);
+          case AF_INET: //IPv6 to IPv4
+          {
+            ip_splice_v6_to_v4(hash_entry->splice_tuple.cli_daddr.v4_addr,
+                               hash_entry->splice_tuple.cli_saddr.v4_addr,
+                               hash_entry->splice_tuple.cli_dport,
+                               hash_entry->splice_tuple.cli_sk_num, skb);
+            if(local_out_v4(skb))
+            {
+              pr_err(MODULE_NAME": %s, error with local_out_v4\n", __func__);
+            }
+            rcu_read_unlock();
+            return NF_STOLEN; //I'll make sure skb arrives to dev_queue_xmit
+            break;
+          }
+          case AF_INET6:
+          {
+            //change dst IP and dst port
+            dnat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, CLI_DIRECTION);
 
-          //change tcp hdr
-          mangle_tcp_splice(tcp_hdr, hash_entry, CLI_DIRECTION);
+            //change tcp hdr
+            mangle_tcp_splice(tcp_hdr, hash_entry, CLI_DIRECTION);
 
-          //change src IP, and src port
-          snat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, CLI_DIRECTION);
+            //change src IP, and src port
+            snat_tcp_splice(ip_hdr, tcp_hdr, hash_entry, CLI_DIRECTION);
 
-          //set new dst route
-          set_dst_route(skb, hash_entry, CLI_DIRECTION);
+            //set new dst route
+            set_dst_route(skb, hash_entry, CLI_DIRECTION);
 
-          break;
+            break;
+          }
+          default:
+          {
+            rcu_read_unlock();
+            return NF_DROP;
+            break;
+          }
         }
-        default:
-        {
-          return NF_DROP;
-          break;
-        }
+
+        rcu_read_unlock();
+        goto checksum;
       }
 
-      goto checksum;
     }
+    rcu_read_unlock();
   }
 
   return NF_ACCEPT;
@@ -773,7 +768,6 @@ unsigned int local_out_v6(struct sk_buff* skb)
 {
   struct ipv6hdr* ip_hdr = (struct ipv6hdr*)skb_network_header(skb); //get L3 info;
   struct tcphdr* tcp_hdr;
-  unsigned int key;
   struct tcp_splice_hash_entry* hash_entry;
 
   if(ip_hdr->nexthdr == IPPROTO_TCP)
@@ -789,38 +783,47 @@ unsigned int local_out_v6(struct sk_buff* skb)
     tcp_hdr = (struct tcphdr*)(skb->data + sizeof(struct ipv6hdr));
 
     //lookup in hashtable
-    key = hash_32(ip_hdr->daddr.in6_u.u6_addr32[0] ^ tcp_hdr->source ^ tcp_hdr->dest,
-                  TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
-    hash_entry = &tcp_splice_ht[key];
-
-    if(TCP_SPLICE_HASH_SPLICE_MODE != hash_entry->session_info.state)
+    rcu_read_lock();
+    hash_for_each_possible_rcu(tcp_splice_ht, hash_entry, hash_node,
+                               ip_hdr->daddr.in6_u.u6_addr32[0] ^ tcp_hdr->source ^ tcp_hdr->dest)
     {
+      //check direction
+      if(tcp_hdr->dest == hash_entry->splice_tuple.req_dport)
+      {
+        //for req
+        mangle_tcp_splice(tcp_hdr, hash_entry, REQ_DIRECTION);
+
+        //set new dst route
+        set_dst_route(skb, hash_entry, REQ_DIRECTION);
+
+        //replace with actual source port
+        tcp_hdr->source = hash_entry->splice_tuple.req_sk_num_ct;
+
+        //check for fin or rst
+        check_for_fin_rst_tcp_splice(tcp_hdr, hash_entry);
+
+      } else if(tcp_hdr->dest == hash_entry->splice_tuple.cli_dport)
+      {
+        //for cli
+        mangle_tcp_splice(tcp_hdr, hash_entry, CLI_DIRECTION);
+
+        //set new dst route
+        set_dst_route(skb, hash_entry, CLI_DIRECTION);
+
+        //replace with actual source port
+        tcp_hdr->source = hash_entry->splice_tuple.cli_sk_num_ct;
+
+        //check for fin or rst
+        check_for_fin_rst_tcp_splice(tcp_hdr, hash_entry);
+      }
+    }
+    rcu_read_unlock();
+
+    if(NULL == skb_dst(skb))
+    {
+      pr_err(MODULE_NAME": skb_dst(skb) is NULL!\n");
       kfree_skb(skb);
       return -1;
-    }
-
-    //check direction
-    if(tcp_hdr->dest == hash_entry->splice_tuple.req_dport)
-    {
-      //for req
-      mangle_tcp_splice(tcp_hdr, hash_entry, REQ_DIRECTION);
-
-      //set new dst route
-      set_dst_route(skb, hash_entry, REQ_DIRECTION);
-
-      //replace with actual source port
-      tcp_hdr->source = hash_entry->splice_tuple.req_sk_num_ct;
-
-    } else if(tcp_hdr->dest == hash_entry->splice_tuple.cli_dport)
-    {
-      //for cli
-      mangle_tcp_splice(tcp_hdr, hash_entry, CLI_DIRECTION);
-
-      //set new dst route
-      set_dst_route(skb, hash_entry, CLI_DIRECTION);
-
-      //replace with actual source port
-      tcp_hdr->source = hash_entry->splice_tuple.cli_sk_num_ct;
     }
 
     //recompute L4 checksum
@@ -828,16 +831,6 @@ unsigned int local_out_v6(struct sk_buff* skb)
     tcp_hdr->check = 0x000;
 
     tcp_hdr->check = qti_tcp_v6_check(skb);
-
-    //check for fin or rst
-    check_for_fin_rst_tcp_splice(tcp_hdr, hash_entry);
-  }
-
-  if(NULL == skb_dst(skb))
-  {
-    pr_err(MODULE_NAME": skb_dst(skb) is NULL!\n");
-    kfree_skb(skb);
-    return -1;
   }
 
   return ip6_local_out(skb); //pass pkt along its traversal
@@ -1013,22 +1006,29 @@ void ip_splice_v6_to_v4(unsigned int v4_daddr, unsigned int v4_saddr, unsigned s
 static void check_for_fin_rst_tcp_splice(struct tcphdr* tcp_hdr,
                                          struct tcp_splice_hash_entry* hash_entry)
 {
+  struct tcp_splice_hash_entry* temp_node = NULL;
+
   if(tcp_hdr->fin || tcp_hdr->rst)
   {
     pr_debug(MODULE_NAME": received FIN or RST!\n");
 
-    if((TCP_SPLICE_HASH_BLOCK_MODE == hash_entry->session_info.state) ||
-       (TCP_SPLICE_HASH_INVALID == hash_entry->session_info.state))
+    //notify userpsace to close the fds
+    sendToUserspace(hash_entry);
+
+    //delete the hash entry for opposite direction
+    rcu_read_lock();
+    hash_for_each_possible_rcu(tcp_splice_ht, temp_node, hash_node, hash_entry->opp_key)
     {
-      pr_debug(MODULE_NAME": already handled this FIN or RST\n");
-
-    } else {
-
-      //have this session_info go into block mode
-      hash_entry->session_info.state = TCP_SPLICE_HASH_BLOCK_MODE;
-      tcp_splice_ht[hash_entry->opp_key].session_info.state = TCP_SPLICE_HASH_BLOCK_MODE;
-      sendToUserspace(hash_entry);
+      hash_del_rcu(&(temp_node->hash_node));
+      kfree(temp_node);
     }
+    rcu_read_unlock();
+
+    //delete the hash entry for this direction
+    rcu_read_lock();
+    hash_del_rcu(&(hash_entry->hash_node));
+    kfree(hash_entry);
+    rcu_read_unlock();
   }
 
   return;

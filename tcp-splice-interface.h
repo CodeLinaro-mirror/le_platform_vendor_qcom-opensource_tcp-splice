@@ -38,9 +38,6 @@
 
 #define SO_TCP_SPLICE 8345 //for setsockopt
 
-//generated hash will be >> (32 - 12) times = >> 20, which is perfectly represented by 12 bits of
-//all F's = 4095
-#define TCP_SPLICE_HASH_SIZE 4096
 #define TCP_SPLICE_HASH_INDEX_SHIFT_SIZE 12
 
 #define TCP_SPLICE_HASH_INVALID 0x00
@@ -58,6 +55,7 @@
 #include <linux/hash.h>
 #include <linux/net.h>
 #include <linux/file.h>
+#include <linux/hashtable.h>
 
 #include <net/netfilter/nf_conntrack_tuple.h>
 #include <net/netfilter/nf_conntrack_core.h>
@@ -79,9 +77,6 @@ struct tcp_splice_session_info
   struct socket* cli_socket;
   struct socket* req_socket;
 
-  //0x00 means invalid entries, 0x01 means block mode, 0x02 means valid splice mode
-  unsigned char state;
-
   //0b00 means don't window size splice
   //0b01 means cli doesn't support window scaling, and req does support window scaling
   //0b10 means cli supports window scaling, and req doesn't support window scaling
@@ -102,9 +97,9 @@ struct timestamp_splice_tuple
 struct window_scale_splice_tuple
 {
   unsigned short cli_isnd_wscale:4, //window scale received from cli
-                  req_isnd_wscale:4, //window scale received from req
-                  cli_ircv_wscale:4, //window scale sent to cli
-                  req_ircv_wscale:4; //window scale sent to req
+                 req_isnd_wscale:4, //window scale received from req
+                 cli_ircv_wscale:4, //window scale sent to cli
+                 req_ircv_wscale:4; //window scale sent to req
 };
 
 union addr
@@ -142,6 +137,7 @@ struct tcp_splice_hash_entry
   struct tcp_splice_session_info session_info;
   struct tcp_splice_tuple splice_tuple;
   unsigned int opp_key; //key to the opposing direction hash entry
+  struct hlist_node hash_node;
 };
 
 
@@ -195,12 +191,10 @@ int tcp_splice_socket(struct sock* sk, int optval, void __user *user, unsigned i
 *
 * Description: inserts tcp splice info into global hash table
 *
-* Parameters: struct tcp_splice_hash_entry* sp_ht; //ptr to tcp splice hash table
-*              struct tcp_splice_session_info* sp_session; //ptr to tcp splice session
+* Parameters: struct tcp_splice_session_info* sp_session; //ptr to tcp splice session
 *
 * Return: 0, success
 *         -1, otherwise
 *
 ***************************************************************************/
-int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
-                          struct tcp_splice_session_info* sp_session);
+int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session);
