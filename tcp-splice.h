@@ -35,12 +35,7 @@
 //IPv6 hdr = 40 bytes, IPv4 hdr = 20 bytes w/ no options; 40 - 20 = 20
 #define IPV6_IPV4_HEADER_DIFF 20
 
-#define MAX_WINDOW_SIZE 0x0000ffff
-
-#define SAFE_REF_CNT 3
-
-#define CLI_DIRECTION 0
-#define REQ_DIRECTION 1
+#define IPV4_HDR_LEN_BYTES(ihl) (ihl << 2)
 
 #include <linux/skbuff.h>
 #include <linux/netfilter.h>
@@ -172,55 +167,11 @@ unsigned int local_out_v6(struct sk_buff* skb);
 
 /***************************************************************************
 *
-* Function: forward_v6
-*
-* Description: callback for IPv6 skb in forward chain
-*
-* Parameters: unsigned int hooknum, //hook number
-*              struct sk_buff* skb, //the skb
-*              const struct net_device* in, //net_device the skb arrived ingress
-*              const struct net_device* out, //net_device the skb should egress
-*              int (*okfn)(struct sk_buff*), //fcn ptr to okfn after all hooks done processing
-*
-* Return: NF_DROP, discard the skb
-*          NF_ACCEPT, continue traversal in kernel network stack
-*          NF_STOLEN, do not continue traversal
-*          NF_QUEUE, queue skb for userspace
-*           NF_REPEAT, call this callback again
-*
-***************************************************************************/
-unsigned int forward_v6(unsigned int hooknum, struct sk_buff* skb, const struct net_device* in,
-                        const struct net_device* out, int (*okfn)(struct sk_buff*));
-
-/***************************************************************************
-*
-* Function: post_route_v6
-*
-* Description: callback for IPv6 skb in postroute chain
-*
-* Parameters: unsigned int hooknum, //hook number
-*              struct sk_buff* skb, //the skb
-*              const struct net_device* in, //net_device the skb arrived ingress
-*              const struct net_device* out, //net_device the skb should egress
-*              int (*okfn)(struct sk_buff*), //fcn ptr to okfn after all hooks done processing
-*
-* Return: NF_DROP, discard the skb
-*          NF_ACCEPT, continue traversal in kernel network stack
-*          NF_STOLEN, do not continue traversal
-*          NF_QUEUE, queue skb for userspace
-*           NF_REPEAT, call this callback again
-*
-***************************************************************************/
-unsigned int post_route_v6(unsigned int hooknum, struct sk_buff* skb, const struct net_device* in,
-                            const struct net_device* out, int (*okfn)(struct sk_buff*));
-
-/***************************************************************************
-*
-* Function: pre_route_v4_to_v6
+* Function: ip_splice_v4_to_v6
 *
 * Description: splices a v4 skb into a v6 skb
 *
-* Parameters: struct in6_addr v6_daddr, // IPv6 daddr to push
+* Parameters:  struct in6_addr v6_daddr, // IPv6 daddr to push
 *              struct in6_addr v6_saddr, // IPv6 saddr to push
 *              unsigned short dest_port, // TCP dest port to push
 *              unsigned short src_port, // TCP src port to push
@@ -229,16 +180,16 @@ unsigned int post_route_v6(unsigned int hooknum, struct sk_buff* skb, const stru
 * Return: none
 *
 ***************************************************************************/
-void pre_route_v4_to_v6(struct in6_addr v6_daddr, struct in6_addr v6_saddr,
+void ip_splice_v4_to_v6(struct in6_addr v6_daddr, struct in6_addr v6_saddr,
                         unsigned short dest_port, unsigned short src_port, struct sk_buff* skb);
 
 /***************************************************************************
 *
-* Function: pre_route_v6_to_v4
+* Function: ip_splice_v6_to_v4
 *
 * Description: splices a v6 skb into a v4 skb
 *
-* Parameters: unsigned int v4_daddr, // IPv4 daddr to push
+* Parameters:  unsigned int v4_daddr, // IPv4 daddr to push
 *              unsigned int v4_saddr, // IPv4 saddr to push
 *              unsigned short dest_port, // TCP dest port to push
 *              unsigned short src_port, // TCP src port to push
@@ -247,25 +198,20 @@ void pre_route_v4_to_v6(struct in6_addr v6_daddr, struct in6_addr v6_saddr,
 * Return: none
 *
 ***************************************************************************/
-void pre_route_v6_to_v4(unsigned int v4_daddr, unsigned int v4_saddr, unsigned short dest_port,
+void ip_splice_v6_to_v4(unsigned int v4_daddr, unsigned int v4_saddr, unsigned short dest_port,
                         unsigned short src_port, struct sk_buff* skb);
 
 /***************************************************************************
 *
-* Function: mangle_tcp_splice
+* Function: check_for_fin_rst_tcp_splice
 *
-* Description: mangles tcp header for another tcp session
+* Description: checks tcp hdr for FIN or RST and notifies userspace
 *
-* Parameters: struct tcphdr* tcp_hdr, //the tcp header
-*             struct tcp_splice_hash_entry* hash_entry //splice session info hash entry
-*              int direction //indicates splice for CLI_DIRECTION or REQ_DIRECTION
+* Parameters:  struct tcphdr* tcp_hdr //the TCP hdr
+*              struct tcp_splice_hash_entry* hash_entry //splice session info hash entry
 *
 * Return: none
 *
-* Precondition: this is an inline fcn, so it is expected tcp_hdr and hash_entry
-*                are not NULL ptrs
-*
 ***************************************************************************/
-static inline void mangle_tcp_splice(struct tcphdr* tcp_hdr,
-                                     struct tcp_splice_hash_entry* hash_entry,
-                                     int direction);
+static void check_for_fin_rst_tcp_splice(struct tcphdr* tcp_hdr,
+                                         struct tcp_splice_hash_entry* hash_entry);
