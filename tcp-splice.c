@@ -734,9 +734,10 @@ unsigned int pre_route_v6(unsigned int hooknum, struct sk_buff* skb, const struc
   checksum:
 
     //recompute L4 checksum
-    skb->ip_summed = CHECKSUM_UNNECESSARY;
     tcp_hdr->check = 0x000;
-    tcp_hdr->check = qti_tcp_v6_check(skb);
+    tcp_hdr->check = csum_ipv6_magic(&ip_hdr->saddr, &ip_hdr->daddr,
+                     ntohs(ip_hdr->payload_len), IPPROTO_TCP,
+                     csum_partial(tcp_hdr, ntohs(ip_hdr->payload_len), 0));
 
     //check for fin or rst
     check_for_fin_rst_tcp_splice(tcp_hdr, hash_entry);
@@ -827,10 +828,10 @@ unsigned int local_out_v6(struct sk_buff* skb)
     }
 
     //recompute L4 checksum
-    skb->ip_summed = CHECKSUM_UNNECESSARY;
     tcp_hdr->check = 0x000;
-
-    tcp_hdr->check = qti_tcp_v6_check(skb);
+    tcp_hdr->check = csum_ipv6_magic(&ip_hdr->saddr, &ip_hdr->daddr,
+                     ntohs(ip_hdr->payload_len), IPPROTO_TCP,
+                     csum_partial(tcp_hdr, ntohs(ip_hdr->payload_len), 0));
   }
 
   return ip6_local_out(skb); //pass pkt along its traversal

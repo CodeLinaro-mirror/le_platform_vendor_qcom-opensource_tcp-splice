@@ -71,19 +71,6 @@ int qti_tcp_fast_parse_options(struct tcphdr* tcp_hdr, unsigned int** timestamp,
 
 /***************************************************************************
 *
-* Function: qti_tcp_v6_check
-*
-* Description: calculates the tcp checksum based on IPv6
-*
-* Parameters: struct sk_buff* skb; //skb to calculate the tcp checksum
-*
-* Return: tcp checksum based on IPv6
-*
-***************************************************************************/
-__sum16 qti_tcp_v6_check(struct sk_buff* skb);
-
-/***************************************************************************
-*
 * Function: dnat_tcp_splice
 *
 * Description: change dst IP addr and dst port for another tcp session
