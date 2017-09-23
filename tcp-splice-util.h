@@ -38,6 +38,11 @@
 
 #define TCPOLEN_SACK_PERBLOCK_SHIFT 3
 
+#define CLI_DIRECTION 0
+#define REQ_DIRECTION 1
+
+#define MAX_WINDOW_SIZE 0x0000ffff
+
 #include <net/tcp.h>
 
 #include <uapi/linux/tcp.h>
@@ -66,13 +71,73 @@ int qti_tcp_fast_parse_options(struct tcphdr* tcp_hdr, unsigned int** timestamp,
 
 /***************************************************************************
 *
-* Function: qti_tcp_v6_check
+* Function: dnat_tcp_splice
 *
-* Description: calculates the tcp checksum based on IPv6
+* Description: change dst IP addr and dst port for another tcp session
 *
-* Parameters: struct sk_buff* skb; //skb to calculate the tcp checksum
+* Parameters: void* iphdr //the IP header
+*             struct tcphdr* tcp_hdr //the TCP header
+*             struct tcp_splice_hash_entry* hash_entry //splice session info hash entry
+*             int direction //indicates splice for CLI_DIRECTION or REQ_DIRECTION
 *
-* Return: tcp checksum based on IPv6
+* Return: none
+*
+* Precondition: it is expected iphdr, tcp_hdr, and hash_entry are not NULL ptrs
 *
 ***************************************************************************/
-__sum16 qti_tcp_v6_check(struct sk_buff* skb);
+void dnat_tcp_splice(void* iphdr, struct tcphdr* tcp_hdr, struct tcp_splice_hash_entry* hash_entry,
+                     int direction);
+
+/***************************************************************************
+*
+* Function: mangle_tcp_splice
+*
+* Description: mangles tcp header for another tcp session
+*
+* Parameters: struct tcphdr* tcp_hdr, //the tcp header
+*             struct tcp_splice_hash_entry* hash_entry //splice session info hash entry
+*             int direction //indicates splice for CLI_DIRECTION or REQ_DIRECTION
+*
+* Return: none
+*
+* Precondition: it is expected tcp_hdr and hash_entry are not NULL ptrs
+*
+***************************************************************************/
+void mangle_tcp_splice(struct tcphdr* tcp_hdr, struct tcp_splice_hash_entry* hash_entry,
+                       int direction);
+
+/***************************************************************************
+*
+* Function: snat_tcp_splice
+*
+* Description: change src IP addr and src port for another tcp session
+*
+* Parameters: void* iphdr //the IP header
+*             struct tcphdr* tcp_hdr //the TCP header
+*             struct tcp_splice_hash_entry* hash_entry //splice session info hash entry
+*             int direction //indicates splice for CLI_DIRECTION or REQ_DIRECTION
+*
+* Return: none
+*
+* Precondition: it is expected iphdr, tcp_hdr, and hash_entry are not NULL ptrs
+*
+***************************************************************************/
+void snat_tcp_splice(void* iphdr, struct tcphdr* tcp_hdr, struct tcp_splice_hash_entry* hash_entry,
+                     int direction);
+
+/***************************************************************************
+*
+* Function: set_dst_route
+*
+* Description: changes skb_dst entry
+*
+* Parameters: struct sk_buff* skb //the skb
+*             struct tcp_splice_hash_entry* hash_entry //splice session info hash entry
+*             int direction //indicates splice for CLI_DIRECTION or REQ_DIRECTION
+*
+* Return: none
+*
+* Precondition: it is expected skb and hash_entry are not NULL ptrs
+*
+***************************************************************************/
+void set_dst_route(struct sk_buff* skb, struct tcp_splice_hash_entry* hash_entry, int direction);
