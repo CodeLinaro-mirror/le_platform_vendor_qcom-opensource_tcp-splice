@@ -36,7 +36,8 @@
 
 extern struct sock* nl_socket;
 extern struct sockaddr_nl userspace_addr;
-extern struct tcp_splice_hash_entry tcp_splice_ht[TCP_SPLICE_HASH_SIZE];
+extern struct hlist_head tcp_splice_ht[1 << TCP_SPLICE_HASH_INDEX_SHIFT_SIZE];
+extern spinlock_t ht_lock;
 
 /***************************************************************************
 *
@@ -178,7 +179,6 @@ int tcp_splice_socket(struct sock* sk, int optval, void __user *user, unsigned i
       if((splice_session_info.cli_socket = sockfd_lookup(splice_session_info.r_session.cli_fd,
                                                           &err)) == NULL)
       {
-
         pr_err(MODULE_NAME": %s error looking up client socket from given userspace fd: "
               "%d\n", __func__, err);
         return -EBADF;
@@ -195,7 +195,7 @@ int tcp_splice_socket(struct sock* sk, int optval, void __user *user, unsigned i
       }
       sockfd_put(splice_session_info.req_socket);
 
-      if(insertSpliceInfoTuple(tcp_splice_ht, &splice_session_info) != 0)
+      if(insertSpliceInfoTuple(&splice_session_info) != 0)
       {
         pr_err(MODULE_NAME": %s error with inserting tcp splice info tuple setsockopt\n",
                __func__);
@@ -222,15 +222,13 @@ int tcp_splice_socket(struct sock* sk, int optval, void __user *user, unsigned i
 *
 * Description: inserts tcp splice info into global hash table
 *
-* Parameters: struct tcp_splice_hash_entry* sp_ht; //ptr to tcp splice hash table
-*             struct tcp_splice_session_info* sp_session; //ptr to tcp splice session
+* Parameters: struct tcp_splice_session_info* sp_session; //ptr to tcp splice session
 *
 * Return: 0, success
 *        -1, otherwise
 *
 ***************************************************************************/
-int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
-                          struct tcp_splice_session_info* sp_session)
+int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
 {
   unsigned char i;
   int j;
@@ -244,12 +242,9 @@ int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
   struct nf_conn* req_ct = NULL;
   struct tcp_sock* cli_tcp_sock = NULL;
   struct tcp_sock* req_tcp_sock = NULL;
+  struct tcp_splice_hash_entry* hash_entry = NULL;
 
-  if(NULL == sp_ht)
-  {
-    pr_err(MODULE_NAME": %s hashtable NULL!\n", __func__);
-    return -EINVAL;
-  } else if(NULL == sp_session)
+  if(NULL == sp_session)
   {
     pr_err(MODULE_NAME": %s splice session NULL!\n", __func__);
     return -EINVAL;
@@ -287,8 +282,8 @@ int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
         return -EBADF;
       }
 
-      key[0] = hash_32(sp_session->cli_socket->sk->sk_daddr ^ sp_session->cli_socket->sk->sk_dport ^
-                       htons(sp_session->cli_socket->sk->sk_num), TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
+      key[0] = sp_session->cli_socket->sk->sk_daddr ^ sp_session->cli_socket->sk->sk_dport ^
+               htons(sp_session->cli_socket->sk->sk_num);
 
       break;
     }
@@ -318,9 +313,8 @@ int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
         return -EBADF;
       }
 
-      key[0] = hash_32(sp_session->cli_socket->sk->sk_v6_daddr.in6_u.u6_addr32[0] ^
-                       sp_session->cli_socket->sk->sk_dport ^
-                       htons(sp_session->cli_socket->sk->sk_num), TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
+      key[0] = sp_session->cli_socket->sk->sk_v6_daddr.in6_u.u6_addr32[0] ^
+               sp_session->cli_socket->sk->sk_dport ^ htons(sp_session->cli_socket->sk->sk_num);
       break;
     }
     default:
@@ -359,8 +353,8 @@ int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
         return -EBADF;
       }
 
-      key[1] = hash_32(sp_session->req_socket->sk->sk_daddr ^ sp_session->req_socket->sk->sk_dport ^
-                       htons(sp_session->req_socket->sk->sk_num), TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
+      key[1] = sp_session->req_socket->sk->sk_daddr ^ sp_session->req_socket->sk->sk_dport ^
+               htons(sp_session->req_socket->sk->sk_num);
       break;
     }
     case AF_INET6:
@@ -391,9 +385,8 @@ int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
         return -EBADF;
       }
 
-      key[1] = hash_32(sp_session->req_socket->sk->sk_v6_daddr.in6_u.u6_addr32[0] ^
-                       sp_session->req_socket->sk->sk_dport ^
-                       htons(sp_session->req_socket->sk->sk_num), TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
+      key[1] = sp_session->req_socket->sk->sk_v6_daddr.in6_u.u6_addr32[0] ^
+               sp_session->req_socket->sk->sk_dport ^ htons(sp_session->req_socket->sk->sk_num);
       break;
     }
     default:
@@ -409,20 +402,48 @@ int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
   //adding two hastable entries: one for cli->req and req->cli
   for(i = 0; i < 2; i++)
   {
+    hash_entry = NULL;
+
+    if((hash_entry = kzalloc(sizeof(struct tcp_splice_hash_entry), GFP_ATOMIC)) == NULL)
+    {
+      pr_err(MODULE_NAME": %s kzalloc failed!\n", __func__);
+      if(i)
+      {
+        //delete and free the other previous hash_entry
+        pr_debug(MODULE_NAME": %s deleting previous hash_entry\n", __func__);
+        rcu_read_lock();
+        hash_for_each_possible(tcp_splice_ht, hash_entry, hash_node, key[0])
+        {
+          if((hash_entry->splice_tuple.cli_dport == sp_session->cli_socket->sk->sk_dport) &&
+            (hash_entry->splice_tuple.cli_sk_num_ct == cli_ct->tuplehash[0].tuple.dst.u.tcp.port) &&
+            (hash_entry->splice_tuple.cli_iss == cli_tcp_sock->snd_nxt) &&
+            (hash_entry->splice_tuple.req_dport == sp_session->req_socket->sk->sk_dport) &&
+            (hash_entry->splice_tuple.req_sk_num_ct == req_ct->tuplehash[1].tuple.dst.u.tcp.port))
+          {
+            hash_del_rcu(&(hash_entry->hash_node));
+            kfree(hash_entry);
+          }
+        }
+        rcu_read_unlock();
+      }
+
+      return -ENOMEM;
+    }
+
     //load client socket FD info
     //depending on IPv4 or IPv6 socket
     switch(sp_session->cli_socket->sk->sk_family)
     {
       case AF_INET:
       {
-        sp_ht[key[i]].splice_tuple.cli_daddr.v4_addr = sp_session->cli_socket->sk->sk_daddr;
-        sp_ht[key[i]].splice_tuple.cli_saddr.v4_addr = sp_session->cli_socket->sk->sk_rcv_saddr;
+        hash_entry->splice_tuple.cli_daddr.v4_addr = sp_session->cli_socket->sk->sk_daddr;
+        hash_entry->splice_tuple.cli_saddr.v4_addr = sp_session->cli_socket->sk->sk_rcv_saddr;
         break;
       }
       case AF_INET6:
       {
-        sp_ht[key[i]].splice_tuple.cli_daddr.v6_addr = sp_session->cli_socket->sk->sk_v6_daddr;
-        sp_ht[key[i]].splice_tuple.cli_saddr.v6_addr = sp_session->cli_socket->sk->sk_v6_rcv_saddr;
+        hash_entry->splice_tuple.cli_daddr.v6_addr = sp_session->cli_socket->sk->sk_v6_daddr;
+        hash_entry->splice_tuple.cli_saddr.v6_addr = sp_session->cli_socket->sk->sk_v6_rcv_saddr;
         break;
 
       }
@@ -433,22 +454,41 @@ int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
         break;
       }
     }
-    sp_ht[key[i]].splice_tuple.cli_family = sp_session->cli_socket->sk->sk_family;
-    sp_ht[key[i]].splice_tuple.cli_dport = sp_session->cli_socket->sk->sk_dport;
-    sp_ht[key[i]].splice_tuple.cli_sk_num = htons(sp_session->cli_socket->sk->sk_num);
-    sp_ht[key[i]].splice_tuple.cli_sk_num_ct = cli_ct->tuplehash[0].tuple.dst.u.tcp.port;
-    sp_ht[key[i]].splice_tuple.cli_iss = cli_tcp_sock->snd_nxt;
-    sp_ht[key[i]].splice_tuple.cli_irs = cli_tcp_sock->rcv_nxt;
+    hash_entry->splice_tuple.cli_family = sp_session->cli_socket->sk->sk_family;
+    hash_entry->splice_tuple.cli_dport = sp_session->cli_socket->sk->sk_dport;
+    hash_entry->splice_tuple.cli_sk_num = htons(sp_session->cli_socket->sk->sk_num);
+    hash_entry->splice_tuple.cli_sk_num_ct = cli_ct->tuplehash[0].tuple.dst.u.tcp.port;
+    hash_entry->splice_tuple.cli_iss = cli_tcp_sock->snd_nxt;
+    hash_entry->splice_tuple.cli_irs = cli_tcp_sock->rcv_nxt;
 
     //do a routing table lookup now
-    if((sp_ht[key[i]].splice_tuple.cli_dst = sk_dst_get(sp_session->cli_socket->sk)) == NULL)
+    if((hash_entry->splice_tuple.cli_dst = sk_dst_get(sp_session->cli_socket->sk)) == NULL)
     {
       pr_err(MODULE_NAME": sk_dst_get returned NULL for cli socket\n");
       nf_ct_put(cli_ct); //clean up
       nf_ct_put(req_ct); //clean up
 
-      sp_ht[key[0]].session_info.state = TCP_SPLICE_HASH_INVALID; //invalidate hash entry
-      sp_ht[key[1]].session_info.state = TCP_SPLICE_HASH_INVALID; //invalidate hash entry
+      if(i)
+      {
+        //delete and free the other previous hash_entry
+        pr_debug(MODULE_NAME": %s deleting previous hash_entry\n", __func__);
+        rcu_read_lock();
+        hash_for_each_possible(tcp_splice_ht, hash_entry, hash_node, key[0])
+        {
+          if((hash_entry->splice_tuple.cli_dport == sp_session->cli_socket->sk->sk_dport) &&
+            (hash_entry->splice_tuple.cli_sk_num_ct == cli_ct->tuplehash[0].tuple.dst.u.tcp.port) &&
+            (hash_entry->splice_tuple.cli_iss == cli_tcp_sock->snd_nxt) &&
+            (hash_entry->splice_tuple.req_dport == sp_session->req_socket->sk->sk_dport) &&
+            (hash_entry->splice_tuple.req_sk_num_ct == req_ct->tuplehash[1].tuple.dst.u.tcp.port))
+          {
+            hash_del_rcu(&(hash_entry->hash_node));
+            kfree(hash_entry);
+          }
+        }
+        rcu_read_unlock();
+      } else {
+        kfree(hash_entry);
+      }
       return -EBADF;
     }
 
@@ -458,14 +498,14 @@ int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
     {
       case AF_INET:
       {
-        sp_ht[key[i]].splice_tuple.req_daddr.v4_addr = sp_session->req_socket->sk->sk_daddr;
-        sp_ht[key[i]].splice_tuple.req_saddr.v4_addr = sp_session->req_socket->sk->sk_rcv_saddr;
+        hash_entry->splice_tuple.req_daddr.v4_addr = sp_session->req_socket->sk->sk_daddr;
+        hash_entry->splice_tuple.req_saddr.v4_addr = sp_session->req_socket->sk->sk_rcv_saddr;
         break;
       }
       case AF_INET6:
       {
-        sp_ht[key[i]].splice_tuple.req_daddr.v6_addr = sp_session->req_socket->sk->sk_v6_daddr;
-        sp_ht[key[i]].splice_tuple.req_saddr.v6_addr = sp_session->req_socket->sk->sk_v6_rcv_saddr;
+        hash_entry->splice_tuple.req_daddr.v6_addr = sp_session->req_socket->sk->sk_v6_daddr;
+        hash_entry->splice_tuple.req_saddr.v6_addr = sp_session->req_socket->sk->sk_v6_rcv_saddr;
         break;
 
       }
@@ -476,11 +516,11 @@ int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
         break;
       }
     }
-    sp_ht[key[i]].splice_tuple.req_family = sp_session->req_socket->sk->sk_family;
+    hash_entry->splice_tuple.req_family = sp_session->req_socket->sk->sk_family;
 
-    sp_ht[key[i]].splice_tuple.req_dport = sp_session->req_socket->sk->sk_dport;
-    sp_ht[key[i]].splice_tuple.req_sk_num = htons(sp_session->req_socket->sk->sk_num);
-    sp_ht[key[i]].splice_tuple.req_sk_num_ct = req_ct->tuplehash[1].tuple.dst.u.tcp.port;
+    hash_entry->splice_tuple.req_dport = sp_session->req_socket->sk->sk_dport;
+    hash_entry->splice_tuple.req_sk_num = htons(sp_session->req_socket->sk->sk_num);
+    hash_entry->splice_tuple.req_sk_num_ct = req_ct->tuplehash[1].tuple.dst.u.tcp.port;
 
     j = sp_session->cli_socket->sk->sk_receive_queue.qlen;
     rcv_queue_bytes = 0;
@@ -493,19 +533,38 @@ int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
       j--;
     }
 
-    sp_ht[key[i]].splice_tuple.req_iss = req_tcp_sock->snd_nxt + rcv_queue_bytes;
-    //sp_ht[key[i]].splice_tuple.req_iss = req_tcp_sock->snd_nxt;
-    sp_ht[key[i]].splice_tuple.req_irs = req_tcp_sock->rcv_nxt;
+    hash_entry->splice_tuple.req_iss = req_tcp_sock->snd_nxt + rcv_queue_bytes;
+    //hash_entry->splice_tuple.req_iss = req_tcp_sock->snd_nxt;
+    hash_entry->splice_tuple.req_irs = req_tcp_sock->rcv_nxt;
 
     //do a routing table lookup now
-    if((sp_ht[key[i]].splice_tuple.req_dst = sk_dst_get(sp_session->req_socket->sk)) == NULL)
+    if((hash_entry->splice_tuple.req_dst = sk_dst_get(sp_session->req_socket->sk)) == NULL)
     {
       pr_err(MODULE_NAME": %s sk_dst_get returned NULL for req socket\n", __func__);
       nf_ct_put(cli_ct); //clean up
       nf_ct_put(req_ct); //clean up
 
-      sp_ht[key[0]].session_info.state = TCP_SPLICE_HASH_INVALID; //invalidate hash entry
-      sp_ht[key[1]].session_info.state = TCP_SPLICE_HASH_INVALID; //invalidate hash entry
+      if(i)
+      {
+        //delete and free the other previous hash_entry
+        pr_debug(MODULE_NAME": %s deleting previous hash_entry\n", __func__);
+        rcu_read_lock();
+        hash_for_each_possible(tcp_splice_ht, hash_entry, hash_node, key[0])
+        {
+          if((hash_entry->splice_tuple.cli_dport == sp_session->cli_socket->sk->sk_dport) &&
+            (hash_entry->splice_tuple.cli_sk_num_ct == cli_ct->tuplehash[0].tuple.dst.u.tcp.port) &&
+            (hash_entry->splice_tuple.cli_iss == cli_tcp_sock->snd_nxt) &&
+            (hash_entry->splice_tuple.req_dport == sp_session->req_socket->sk->sk_dport) &&
+            (hash_entry->splice_tuple.req_sk_num_ct == req_ct->tuplehash[1].tuple.dst.u.tcp.port))
+          {
+            hash_del_rcu(&(hash_entry->hash_node));
+            kfree(hash_entry);
+          }
+        }
+        rcu_read_unlock();
+      } else {
+        kfree(hash_entry);
+      }
       return -EBADF;
     }
 
@@ -515,66 +574,66 @@ int insertSpliceInfoTuple(struct tcp_splice_hash_entry* sp_ht,
     if(cli_tcp_sock->rx_opt.tstamp_ok && req_tcp_sock->rx_opt.tstamp_ok)
     {
       //we must splice Timestamps
-      sp_ht[key[i]].session_info.rx_opt_timestamp_ok = 1;
+      hash_entry->session_info.rx_opt_timestamp_ok = 1;
 
-      sp_ht[key[i]].splice_tuple.tstamp_option.cli_ircv_tsval = cli_tcp_sock->rx_opt.rcv_tsval;
-      sp_ht[key[i]].splice_tuple.tstamp_option.cli_ircv_tsecr = cli_tcp_sock->rx_opt.rcv_tsecr;
+      hash_entry->splice_tuple.tstamp_option.cli_ircv_tsval = cli_tcp_sock->rx_opt.rcv_tsval;
+      hash_entry->splice_tuple.tstamp_option.cli_ircv_tsecr = cli_tcp_sock->rx_opt.rcv_tsecr;
 
-      sp_ht[key[i]].splice_tuple.tstamp_option.req_ircv_tsval = req_tcp_sock->rx_opt.rcv_tsval;
-      sp_ht[key[i]].splice_tuple.tstamp_option.req_ircv_tsecr = req_tcp_sock->rx_opt.rcv_tsecr;
-
+      hash_entry->splice_tuple.tstamp_option.req_ircv_tsval = req_tcp_sock->rx_opt.rcv_tsval;
+      hash_entry->splice_tuple.tstamp_option.req_ircv_tsecr = req_tcp_sock->rx_opt.rcv_tsecr;
 
     } else {
-      sp_ht[key[i]].session_info.rx_opt_timestamp_ok = 0;
+      hash_entry->session_info.rx_opt_timestamp_ok = 0;
     }
 
     //Window Scaling
-    memset(&sp_ht[key[i]].splice_tuple.wscale_option, 0, sizeof(struct window_scale_splice_tuple));
+    memset(&hash_entry->splice_tuple.wscale_option, 0, sizeof(struct window_scale_splice_tuple));
 
     if(cli_tcp_sock->rx_opt.wscale_ok)
     {
       //we need to window size splice
-      sp_ht[key[i]].session_info.rx_opt_wscale_ok |= CLIENT_SUPPORTS_WINDOW_SCALING;
-      sp_ht[key[i]].splice_tuple.wscale_option.cli_isnd_wscale = cli_tcp_sock->rx_opt.snd_wscale;
-      sp_ht[key[i]].splice_tuple.wscale_option.cli_ircv_wscale = cli_tcp_sock->rx_opt.rcv_wscale;
+      hash_entry->session_info.rx_opt_wscale_ok |= CLIENT_SUPPORTS_WINDOW_SCALING;
+      hash_entry->splice_tuple.wscale_option.cli_isnd_wscale = cli_tcp_sock->rx_opt.snd_wscale;
+      hash_entry->splice_tuple.wscale_option.cli_ircv_wscale = cli_tcp_sock->rx_opt.rcv_wscale;
     }
 
     if(req_tcp_sock->rx_opt.wscale_ok)
     {
       //we need to window size splice
-      sp_ht[key[i]].session_info.rx_opt_wscale_ok |= REMOTE_SUPPORTS_WINDOW_SCALING;
-      sp_ht[key[i]].splice_tuple.wscale_option.req_isnd_wscale = req_tcp_sock->rx_opt.snd_wscale;
-      sp_ht[key[i]].splice_tuple.wscale_option.req_ircv_wscale = req_tcp_sock->rx_opt.rcv_wscale;
+      hash_entry->session_info.rx_opt_wscale_ok |= REMOTE_SUPPORTS_WINDOW_SCALING;
+      hash_entry->splice_tuple.wscale_option.req_isnd_wscale = req_tcp_sock->rx_opt.snd_wscale;
+      hash_entry->splice_tuple.wscale_option.req_ircv_wscale = req_tcp_sock->rx_opt.rcv_wscale;
     }
 
     //SACK
     if(cli_tcp_sock->rx_opt.sack_ok & req_tcp_sock->rx_opt.sack_ok & TCP_SACK_SEEN)
     {
       //we must splice SACKs
-      sp_ht[key[i]].session_info.rx_opt_sack_ok = 1;
+      hash_entry->session_info.rx_opt_sack_ok = 1;
 
     } else {
-      sp_ht[key[i]].session_info.rx_opt_sack_ok = 0;
+      hash_entry->session_info.rx_opt_sack_ok = 0;
     }
 
     //load session info
-    sp_ht[key[i]].session_info.r_session.cli_fd = sp_session->r_session.cli_fd;
-    sp_ht[key[i]].session_info.r_session.req_fd = sp_session->r_session.req_fd;
-    sp_ht[key[i]].session_info.cli_socket = sp_session->cli_socket;
-    sp_ht[key[i]].session_info.req_socket = sp_session->req_socket;
+    hash_entry->session_info.r_session.cli_fd = sp_session->r_session.cli_fd;
+    hash_entry->session_info.r_session.req_fd = sp_session->r_session.req_fd;
+    hash_entry->session_info.cli_socket = sp_session->cli_socket;
+    hash_entry->session_info.req_socket = sp_session->req_socket;
 
-    if(TCP_SPLICE_HASH_SPLICE_MODE == sp_ht[key[i]].session_info.state)
+    //add keys to opposing directions
+    if(i)
     {
-      pr_err(MODULE_NAME": %s uh oh, hash collision...\n", __func__);
+      hash_entry->opp_key = key[0];
     } else {
-      sp_ht[key[i]].session_info.state = TCP_SPLICE_HASH_SPLICE_MODE;
+      hash_entry->opp_key = key[1];
     }
 
-  }
+    spin_lock_bh(&ht_lock);
+    hash_add_rcu(tcp_splice_ht, &(hash_entry->hash_node), key[i]);
+    spin_unlock_bh(&ht_lock);
 
-  //add keys to opposing directions
-  sp_ht[key[0]].opp_key = key[1];
-  sp_ht[key[1]].opp_key = key[0];
+  }
 
   //clean up
   nf_ct_put(cli_ct);
