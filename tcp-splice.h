@@ -75,7 +75,7 @@ unsigned int pre_route_v4(unsigned int hooknum, struct sk_buff* skb, const struc
 *
 * Function: local_out_v4
 *
-* Description: tcp splices an skb for ip_local_out
+* Description: calls ip_local_out after checksumming skb
 *
 * Parameters: struct sk_buff* skb, //the skb
 *
@@ -155,7 +155,7 @@ unsigned int pre_route_v6(unsigned int hooknum, struct sk_buff* skb, const struc
 *
 * Function: local_out_v6
 *
-* Description: tcp splices an skb for ip6_local_out
+* Description: calls ip6_local_out after checksumming skb
 *
 * Parameters: struct sk_buff* skb, //the skb
 *
