@@ -73,7 +73,10 @@ static int __init tcp_splice_init(void)
 
   //define proc file and operations
   memset(&proc_file_ops, 0, sizeof(struct file_operations));
+
+#ifndef ISKERNELABOVE_4_9
   proc_file_ops.owner = THIS_MODULE;
+#endif
   proc_file_ops.read =  tcp_splice_proc_read_cb;
   proc_file_ops.write = tcp_splice_proc_write_cb;
   if((proc_file = proc_create(PROC_FILE_NAME, 0, init_net.proc_net, &proc_file_ops)) == NULL)
@@ -106,7 +109,9 @@ static int __init tcp_splice_init(void)
 
   //fill out the nf_hook_ops struct
   pre_hook_v4.hook = (nf_hookfn*)pre_route_v4;
+ #ifndef ISKERNELABOVE_4_9
   pre_hook_v4.owner = THIS_MODULE;
+ #endif
   pre_hook_v4.pf = NFPROTO_IPV4; //match on IPV4 pkts
   pre_hook_v4.hooknum = NF_INET_PRE_ROUTING; //hook into the PRE_ROUTING
   hook_priority = NF_IP_PRI_NAT_DST; //specifying that we are DNAT priority
@@ -121,7 +126,9 @@ static int __init tcp_splice_init(void)
 
   //fill out the nf_hook_ops struct
   fwd_hook_v4.hook = (nf_hookfn*)forward_v4;
+#ifndef ISKERNELABOVE_4_9
   fwd_hook_v4.owner = THIS_MODULE;
+#endif
   fwd_hook_v4.pf = NFPROTO_IPV4; //match on IPV4 pkts
   fwd_hook_v4.hooknum = NF_INET_FORWARD; //NF_INET_FORWARD
   hook_priority = NF_IP_PRI_MANGLE; //specifying that we are MANGLE priority
@@ -135,7 +142,9 @@ static int __init tcp_splice_init(void)
 
   //fill out the nf_hook_ops struct
   post_hook_v4.hook = (nf_hookfn*)post_route_v4;
+ #ifndef ISKERNELABOVE_4_9
   post_hook_v4.owner = THIS_MODULE;
+ #endif
   post_hook_v4.pf = NFPROTO_IPV4; //match on IPV4 pkts
   post_hook_v4.hooknum = NF_INET_POST_ROUTING; //NF_INET_POST_ROUTING
   hook_priority = NF_IP_PRI_LAST;
@@ -149,7 +158,9 @@ static int __init tcp_splice_init(void)
 
   //fill out the nf_hook_ops struct
   pre_hook_v6.hook = (nf_hookfn*)pre_route_v6;
+  #ifndef ISKERNELABOVE_4_9
   pre_hook_v6.owner = THIS_MODULE;
+  #endif
   pre_hook_v6.pf = NFPROTO_IPV6; //match on IPV6 pkts
   pre_hook_v6.hooknum = NF_INET_PRE_ROUTING; //hook into the PRE_ROUTING
   hook_priority = NF_IP_PRI_NAT_DST; //specifying that we are DNAT priority
@@ -169,7 +180,9 @@ static int __init tcp_splice_init(void)
   tcp_splice_sockopt_hook.set = tcp_splice_socket;
   tcp_splice_sockopt_hook.set_optmin = SO_TCP_SPLICE;
   tcp_splice_sockopt_hook.set_optmax = SO_TCP_SPLICE + 1;
+  #ifndef ISKERNELABOVE_4_9
   tcp_splice_sockopt_hook.owner = THIS_MODULE;
+  #endif
   if(nf_register_sockopt(&tcp_splice_sockopt_hook) != 0)
   {
     pr_err(MODULE_NAME": error registering the setsockopt callback\n");
@@ -550,8 +563,11 @@ unsigned int local_out_v4(struct sk_buff* skb)
                                 ip_hdr->saddr, ip_hdr->daddr,
                                 csum_partial((unsigned char*)tcp_hdr,
                                 skb->len - (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)), 0));
-
+#ifdef ISKERNELABOVE_4_9
+  return  ip_local_out(dev_net(skb_dst(skb)->dev), skb->sk, skb);
+#else
   return ip_local_out(skb); //pass pkt along its traversal
+#endif
 }
 
 /***************************************************************************
@@ -895,8 +911,12 @@ unsigned int pre_route_v6(unsigned int hooknum, struct sk_buff* skb, const struc
       kfree_skb(skb);
       return -1;
     }
+#ifdef ISKERNELABOVE_4_9
+     ip6_local_out(dev_net(skb_dst(skb)->dev), skb->sk, skb);
+#else
+     ip6_local_out(skb); //pass pkt along its traversal
+#endif
 
-    ip6_local_out(skb);
     return NF_STOLEN;
 }
 
@@ -939,8 +959,11 @@ unsigned int local_out_v6(struct sk_buff* skb)
   tcp_hdr->check = csum_ipv6_magic(&ip_hdr->saddr, &ip_hdr->daddr,
                    ntohs(ip_hdr->payload_len), IPPROTO_TCP,
                    csum_partial(tcp_hdr, ntohs(ip_hdr->payload_len), 0));
-
+#ifdef ISKERNELABOVE_4_9
+     return ip6_local_out(dev_net(skb_dst(skb)->dev), skb->sk, skb);  //pass pkt along its traversal
+#else
   return ip6_local_out(skb); //pass pkt along its traversal
+#endif
 }
 
 /***************************************************************************

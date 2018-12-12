@@ -272,6 +272,15 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
       conn_tuple[0].dst.u.tcp.port = sp_session->cli_socket->sk->sk_dport;
       conn_tuple[0].dst.protonum = sp_session->cli_socket->sk->sk_protocol;
       conn_tuple[0].dst.dir = IP_CT_DIR_ORIGINAL;
+#ifdef ISKERNELABOVE_4_9
+      if((cli_conn_hash = nf_conntrack_find_get(sock_net(sp_session->cli_socket->sk),
+                                                NF_CT_DEFAULT_ZONE_ID, &conn_tuple[0])) == NULL)
+      {
+        pr_debug(MODULE_NAME": %s couldn't find get the client socket conntrack hash\n",
+                 __func__);
+        return -EBADF;
+      }
+#else
       if((cli_conn_hash = nf_conntrack_find_get(sock_net(sp_session->cli_socket->sk),
                                                 NF_CT_DEFAULT_ZONE, &conn_tuple[0])) == NULL)
       {
@@ -279,7 +288,7 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
                  __func__);
         return -EBADF;
       }
-
+#endif
       if((cli_ct = nf_ct_tuplehash_to_ctrack(cli_conn_hash)) == NULL)
       {
         pr_debug(MODULE_NAME": %s couldn't convert client hash to "
@@ -303,6 +312,15 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
       conn_tuple[0].dst.u.tcp.port = sp_session->cli_socket->sk->sk_dport;
       conn_tuple[0].dst.protonum = sp_session->cli_socket->sk->sk_protocol;
       conn_tuple[0].dst.dir = IP_CT_DIR_ORIGINAL;
+#ifdef ISKERNELABOVE_4_9
+      if((cli_conn_hash = nf_conntrack_find_get(sock_net(sp_session->cli_socket->sk),
+                                            NF_CT_DEFAULT_ZONE_ID, &conn_tuple[0])) == NULL)
+      {
+        pr_debug(MODULE_NAME": %s couldn't find get the client socket conntrack hash\n",
+                 __func__);
+        return -EBADF;
+      }
+#else
       if((cli_conn_hash = nf_conntrack_find_get(sock_net(sp_session->cli_socket->sk),
                                             NF_CT_DEFAULT_ZONE, &conn_tuple[0])) == NULL)
       {
@@ -310,7 +328,7 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
                  __func__);
         return -EBADF;
       }
-
+#endif
       if((cli_ct = nf_ct_tuplehash_to_ctrack(cli_conn_hash)) == NULL)
       {
         pr_debug(MODULE_NAME": %s couldn't convert client hash to conntrack entry\n",
@@ -341,6 +359,16 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
       conn_tuple[1].dst.u.tcp.port = sp_session->req_socket->sk->sk_dport;
       conn_tuple[1].dst.protonum = sp_session->req_socket->sk->sk_protocol;
       conn_tuple[1].dst.dir = IP_CT_DIR_ORIGINAL;
+#ifdef ISKERNELABOVE_4_9
+      if((req_conn_hash = nf_conntrack_find_get(sock_net(sp_session->req_socket->sk),
+                                                NF_CT_DEFAULT_ZONE_ID, &conn_tuple[1])) == NULL)
+      {
+        pr_debug(MODULE_NAME": %s couldn't find get the req socket conntrack hash\n",
+                 __func__);
+        nf_ct_put(cli_ct); //clean up
+        return -EBADF;
+      }
+#else
       if((req_conn_hash = nf_conntrack_find_get(sock_net(sp_session->req_socket->sk),
                                                 NF_CT_DEFAULT_ZONE, &conn_tuple[1])) == NULL)
       {
@@ -349,7 +377,7 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
         nf_ct_put(cli_ct); //clean up
         return -EBADF;
       }
-
+#endif
       if((req_ct = nf_ct_tuplehash_to_ctrack(req_conn_hash)) == NULL)
       {
         pr_debug(MODULE_NAME": %s couldn't convert req hash to conntrack entry\n",
@@ -373,6 +401,16 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
       conn_tuple[1].dst.u.tcp.port = sp_session->req_socket->sk->sk_dport;
       conn_tuple[1].dst.protonum = sp_session->req_socket->sk->sk_protocol;
       conn_tuple[1].dst.dir = IP_CT_DIR_ORIGINAL;
+#ifdef ISKERNELABOVE_4_9
+      if((req_conn_hash = nf_conntrack_find_get(sock_net(sp_session->req_socket->sk),
+                                            NF_CT_DEFAULT_ZONE_ID, &conn_tuple[1])) == NULL)
+      {
+        pr_debug(MODULE_NAME": %s couldn't find get the req socket conntrack hash\n",
+                 __func__);
+        nf_ct_put(cli_ct); //clean up
+        return -EBADF;
+      }
+#else
       if((req_conn_hash = nf_conntrack_find_get(sock_net(sp_session->req_socket->sk),
                                             NF_CT_DEFAULT_ZONE, &conn_tuple[1])) == NULL)
       {
@@ -381,7 +419,7 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
         nf_ct_put(cli_ct); //clean up
         return -EBADF;
       }
-
+#endif
       if((req_ct = nf_ct_tuplehash_to_ctrack(req_conn_hash)) == NULL)
       {
         pr_debug(MODULE_NAME": %s couldn't convert req hash to conntrack entry\n",

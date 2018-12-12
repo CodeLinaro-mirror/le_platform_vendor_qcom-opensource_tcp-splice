@@ -1,4 +1,10 @@
 KERNEL_SRC ?= /lib/modules/$(shell uname -r)/build
+KVER = $(KERNEL_VERSION)
+
+ifeq ($(KVER),$(filter 4.9%,$(KVER)))
+ccflags-y += -DISKERNELABOVE_4_9
+endif
+
 
 obj-m += tcp_splice.o
 

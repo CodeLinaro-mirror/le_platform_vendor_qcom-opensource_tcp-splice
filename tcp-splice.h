@@ -42,6 +42,7 @@
 #include <linux/skbuff.h>
 #include <linux/netfilter.h>
 #include <linux/types.h>
+#include <linux/proc_fs.h>
 
 #include <asm/checksum.h>
 
