@@ -5,6 +5,9 @@ ifeq ($(KVER),$(filter 4.9%,$(KVER)))
 ccflags-y += -DISKERNELABOVE_4_9
 endif
 
+ifeq ($(KVER),$(filter 4.1%,$(KVER)))
+ccflags-y += -DISKERNELABOVE_4_9 -DISKERNEL4_14
+endif
 
 obj-m += tcp_splice.o
 

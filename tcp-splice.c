@@ -36,6 +36,14 @@
 #include "tcp-splice-util.h"
 #include "tcp-splice.h"
 
+#ifdef ISKERNEL4_14
+#define REGISTER_HOOKS(hook_struct) (nf_register_net_hook(&init_net, &hook_struct))
+#define UNREGISTER_HOOKS(hook_struct) (nf_unregister_net_hook(&init_net, &hook_struct))
+#else
+#define REGISTER_HOOKS(hook_struct) (nf_register_hook(&hook_struct))
+#define UNREGISTER_HOOKS(hook_struct) (nf_unregister_hook(&hook_struct))
+#endif
+
 static struct proc_dir_entry* proc_file = NULL;
 static struct file_operations proc_file_ops;
 
@@ -117,7 +125,8 @@ static int __init tcp_splice_init(void)
   hook_priority = NF_IP_PRI_NAT_DST; //specifying that we are DNAT priority
   //hook_priority = NF_IP_PRI_FIRST;
   pre_hook_v4.priority = hook_priority;
-  if(nf_register_hook(&pre_hook_v4) != 0)
+
+  if(REGISTER_HOOKS(pre_hook_v4) != 0)
   {
     pr_err(MODULE_NAME": error registering the pre_hook_v4 callback\n");
     netlink_kernel_release(nl_socket);
@@ -133,7 +142,8 @@ static int __init tcp_splice_init(void)
   fwd_hook_v4.hooknum = NF_INET_FORWARD; //NF_INET_FORWARD
   hook_priority = NF_IP_PRI_MANGLE; //specifying that we are MANGLE priority
   fwd_hook_v4.priority = hook_priority;
-  if(nf_register_hook(&fwd_hook_v4) != 0)
+
+  if(REGISTER_HOOKS(fwd_hook_v4) != 0)
   {
     pr_err(MODULE_NAME": error registering the fwd_hook_v4 callback\n");
     netlink_kernel_release(nl_socket);
@@ -149,7 +159,8 @@ static int __init tcp_splice_init(void)
   post_hook_v4.hooknum = NF_INET_POST_ROUTING; //NF_INET_POST_ROUTING
   hook_priority = NF_IP_PRI_LAST;
   post_hook_v4.priority = hook_priority;
-  if(nf_register_hook(&post_hook_v4) != 0)
+
+  if(REGISTER_HOOKS(post_hook_v4) != 0)
   {
     pr_err(MODULE_NAME": error registering the post_hook_v4 callback\n");
     netlink_kernel_release(nl_socket);
@@ -165,7 +176,8 @@ static int __init tcp_splice_init(void)
   pre_hook_v6.hooknum = NF_INET_PRE_ROUTING; //hook into the PRE_ROUTING
   hook_priority = NF_IP_PRI_NAT_DST; //specifying that we are DNAT priority
   pre_hook_v6.priority = hook_priority;
-  if(nf_register_hook(&pre_hook_v6) != 0)
+
+  if(REGISTER_HOOKS(pre_hook_v6) != 0)
   {
     pr_err(MODULE_NAME": error registering the pre_hook_v6 callback\n");
     netlink_kernel_release(nl_socket);
@@ -213,10 +225,11 @@ static void __exit tcp_splice_exit(void)
 
   pr_info(MODULE_NAME": cleaning up...\n");
 
-  nf_unregister_hook(&pre_hook_v4);
-  nf_unregister_hook(&fwd_hook_v4);
-  nf_unregister_hook(&post_hook_v4);
-  nf_unregister_hook(&pre_hook_v6);
+  UNREGISTER_HOOKS(pre_hook_v4);
+  UNREGISTER_HOOKS(fwd_hook_v4);
+  UNREGISTER_HOOKS(post_hook_v4);
+  UNREGISTER_HOOKS(pre_hook_v6);
+
   nf_unregister_sockopt(&tcp_splice_sockopt_hook);
   netlink_kernel_release(nl_socket);
 
@@ -536,10 +549,18 @@ unsigned int local_out_v4(struct sk_buff* skb)
 
   tcp_hdr = (struct tcphdr*)(skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl))); //get L4 info
 
+#ifdef ISKERNEL4_14
+  if(((struct nf_conn*)skb_nfct(skb)))
+#else
   if(((struct nf_conn*)skb->nfct))
+#endif
   {
     //tell conntrack we already NAT'ed
+#ifdef ISKERNEL4_14
+    ((struct nf_conn*)skb_nfct(skb))->status |= IPS_NAT_DONE_MASK;
+#else
     ((struct nf_conn*)skb->nfct)->status |= IPS_NAT_DONE_MASK;
+#endif
   } else {
     pr_debug(MODULE_NAME": skb->nfct is NULL!\n");
     kfree_skb(skb);
