@@ -39,11 +39,15 @@
 #define SO_TCP_SPLICE 8345 //for setsockopt
 
 #define TCP_SPLICE_HASH_INDEX_SHIFT_SIZE 12
+#define TCP_SPLICE_PDN_HASH_INDEX_SHIFT_SIZE 2
 
+#define TCP_SPLICE_MAX_PDN_OFFLOAD 4
 #define CLIENT_SUPPORTS_WINDOW_SCALING 0b10
 #define REMOTE_SUPPORTS_WINDOW_SCALING 0b01
 
 #define IPV6_MAX_PAYLOAD 1412
+#define TCP_SPLICE_MIN_IPA_HANDLE -1
+#define TCP_SPLICE_IPA_OFFLOAD_SUCCESS 0
 
 #define PRINTK_IPV6_ADDR(v6_addr) \
         pr_info(MODULE_NAME \
@@ -62,6 +66,7 @@
 #include <linux/net.h>
 #include <linux/file.h>
 #include <linux/hashtable.h>
+#include <linux/ipa.h>
 
 #include <net/netfilter/nf_conntrack_tuple.h>
 #include <net/netfilter/nf_conntrack_core.h>
@@ -145,9 +150,19 @@ struct tcp_splice_hash_entry
   struct tcp_splice_session_info session_info;
   struct tcp_splice_tuple splice_tuple;
   unsigned int opp_key; //key to the opposing direction hash entry
+  int ipa_handle;
+  unsigned int pdn_hash_key;
 };
 
-
+struct tcp_splice_pdn_hash_entry
+{
+  struct hlist_node hash_node;
+  struct rcu_head rcu;
+  unsigned short daddr_family;
+  union addr daddr;
+  unsigned short req_dport;
+  unsigned short req_sk_num;
+};
 /***************************************************************************
 *
 * Function: listenFromUserspace
@@ -218,3 +233,34 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session);
 *
 ***************************************************************************/
 void printSessionInfo(struct tcp_splice_session_info* sp_session);
+#ifdef IPA_SOCKsv5_ADD_COM_ID
+/***************************************************************************
+*
+* Function: AddIPASOCKSSession
+*
+* Description: Configures IPA with SOCKSv5 session info
+*
+* Parameters: struct tcp_splice_tuple splice_tuple; //ptr to tcp splice tuple
+* struct tcp_splice_session_info *session_info, //ptr to session info
+* unsigned int pdn_hash_key // pointer to pdn hash key to store in hash entry
+*
+* Return: ipa handle
+*
+***************************************************************************/
+int AddIPASOCKSSession(struct tcp_splice_tuple *splice_tuple,
+                       struct tcp_splice_session_info *session_info,
+                       unsigned int *pdn_hash_key);
+
+/***************************************************************************
+*
+* Function: DeleteIPASOCKSSession
+*
+* Description: Configures IPA with SOCKSv5 session info
+*
+* Parameters: int ipa_handle; //ipa handle to delete
+*
+* Return: void
+*
+***************************************************************************/
+void DeleteIPASOCKSSession(int ipa_handle);
+#endif

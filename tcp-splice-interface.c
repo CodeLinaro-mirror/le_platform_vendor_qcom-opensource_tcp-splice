@@ -39,7 +39,9 @@ extern struct sock* nl_socket;
 extern struct sockaddr_nl userspace_addr;
 extern struct hlist_head tcp_splice_ht[1 << TCP_SPLICE_HASH_INDEX_SHIFT_SIZE];
 extern spinlock_t ht_lock;
-
+extern struct hlist_head tcp_splice_pdn_ht[1 << TCP_SPLICE_PDN_HASH_INDEX_SHIFT_SIZE];
+extern unsigned int pdn_offload_size;
+extern spinlock_t ht_pdn_lock;
 /***************************************************************************
 *
 * Function: listenFromUserspace
@@ -236,7 +238,7 @@ int tcp_splice_socket(struct sock* sk, int optval, void __user *user, unsigned i
 int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
 {
   unsigned char i;
-  int j;
+  int j, ipa_handle = TCP_SPLICE_MIN_IPA_HANDLE;
   unsigned int rcv_queue_bytes;
   unsigned int key[2]; //first key will be for client, second key for req
   struct nf_conntrack_tuple conn_tuple[2]; //index 0 for client, index 1 for req
@@ -248,6 +250,7 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
   struct tcp_sock* cli_tcp_sock = NULL;
   struct tcp_sock* req_tcp_sock = NULL;
   struct tcp_splice_hash_entry* hash_entry = NULL;
+  unsigned int pdn_hash_key = 0;
 
   if(NULL == sp_session)
   {
@@ -674,11 +677,23 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
     } else {
       hash_entry->opp_key = key[1];
     }
-
+#ifdef IPA_SOCKsv5_ADD_COM_ID
+    if(!i){
+      if((ipa_handle = AddIPASOCKSSession(&hash_entry->splice_tuple,
+                                          &hash_entry->session_info,
+                                          &pdn_hash_key)) == TCP_SPLICE_MIN_IPA_HANDLE)
+      {
+        pr_err(MODULE_NAME": failed adding SOCKSv5 session to IPA\n");
+      }
+    }
+#endif
+    pr_debug(MODULE_NAME":Insert hash entry with ipa handle %d",ipa_handle);
+    hash_entry->ipa_handle = ipa_handle;
+    hash_entry->pdn_hash_key = pdn_hash_key;
     spin_lock_bh(&ht_lock);
     hash_add_rcu(tcp_splice_ht, &(hash_entry->hash_node), key[i]);
-    pr_debug(MODULE_NAME": inserted for key = 0x%x\n", key[i]);
     spin_unlock_bh(&ht_lock);
+
 
   }
 
@@ -790,3 +805,272 @@ void printSessionInfo(struct tcp_splice_session_info* sp_session)
   pr_info(MODULE_NAME": req_rx_opt.splice_rcv_wscale = %u\n", req_tcp_sock->rx_opt.rcv_wscale);
   pr_info(MODULE_NAME": req_rx_opt.sack_ok = %u\n", req_tcp_sock->rx_opt.sack_ok & TCP_SACK_SEEN);
 }
+#ifdef IPA_SOCKsv5_ADD_COM_ID
+/***************************************************************************
+*
+* Function: AddIPASOCKSSession
+*
+* Description: Configures IPA with SOCKSv5 session info
+*
+* Parameters: struct tcp_splice_tuple splice_tuple //ptr to tcp splice tuple
+* struct tcp_splice_session_info *session_info //ptr to session info
+* unsigned int pdn_hash_key // pointer to pdn hash key to store in hash entry
+*
+* Return: ipa handle
+*
+***************************************************************************/
+int AddIPASOCKSSession(struct tcp_splice_tuple *splice_tuple,
+                       struct tcp_splice_session_info *session_info,
+                       unsigned int *pdn_hash_key)
+{
+
+  struct ipa_socksv5_info ipa_socks_session_info;
+  int ipa_handle = TCP_SPLICE_MIN_IPA_HANDLE, pdn_found = 0, ipa_return_val = -1;
+  struct tcp_splice_pdn_hash_entry* pdn_hash_entry = NULL;
+
+  if (splice_tuple == NULL){
+    pr_err(MODULE_NAME": %s : %d splice_tuple is NULL\n", __func__, __LINE__);
+    return TCP_SPLICE_MIN_IPA_HANDLE;
+  }
+  memset((void *)&ipa_socks_session_info, 0, sizeof(ipa_socks_session_info));
+
+  /*fill IPA uC DL template*/
+  ipa_socks_session_info.dl_out.ipa_sockv5_mask |= IPA_SOCKSv5_ENTRY_VALID;
+
+  if (splice_tuple->cli_family == AF_INET6 && splice_tuple->req_family == AF_INET){
+    pr_info(MODULE_NAME":v4 <-> v6 translation, call IPA offload\n");
+    ipa_socks_session_info.ul_out.cmd_id = IPA_SOCKsv5_ADD_COM_ID;
+    ipa_socks_session_info.ul_out.cmd_param = IPA_SOCKsv5_ADD_V6_V4_COM_PM;
+    ipa_socks_session_info.dl_out.cmd_id = IPA_SOCKsv5_ADD_COM_ID;
+    ipa_socks_session_info.dl_out.cmd_param = IPA_SOCKsv5_ADD_V4_V6_COM_PM;
+  }
+  else{
+    pr_err(MODULE_NAME":IPA offload not supported for this translation\n");
+    return TCP_SPLICE_MIN_IPA_HANDLE;
+  }
+  /* Update uC IP header template information*/
+  switch(splice_tuple->cli_family){
+    case AF_INET:
+    {
+      ipa_socks_session_info.dl_out.ipa_sockv5_mask |= IPA_SOCKSv5_IPV4;
+      ipa_socks_session_info.dl_out.ip_hdr.ipv4_rsv.ipv4_temp.daddr = splice_tuple->cli_daddr.v4_addr;
+      ipa_socks_session_info.dl_out.ip_hdr.ipv4_rsv.ipv4_temp.saddr = splice_tuple->cli_saddr.v4_addr;
+      ipa_socks_session_info.dl_out.ip_hdr.ipv4_rsv.ipv4_temp.ihl = 5;
+      ipa_socks_session_info.dl_out.ip_hdr.ipv4_rsv.ipv4_temp.protocol = IPPROTO_TCP;
+      ipa_socks_session_info.dl_out.ip_hdr.ipv4_rsv.ipv4_temp.version = 4;
+    }
+    break;
+    case AF_INET6:
+    {
+      ipa_socks_session_info.dl_out.ipa_sockv5_mask |= IPA_SOCKSv5_IPV6;
+      ipa_socks_session_info.dl_out.ip_hdr.ipv6_temp.daddr = splice_tuple->cli_daddr.v6_addr;
+      ipa_socks_session_info.dl_out.ip_hdr.ipv6_temp.saddr = splice_tuple->cli_saddr.v6_addr;
+      ipa_socks_session_info.dl_out.ip_hdr.ipv6_temp.version = 6;
+      ipa_socks_session_info.dl_out.ip_hdr.ipv6_temp.nexthdr = IPPROTO_TCP;
+    }
+    break;
+    default:
+    {
+      pr_err(MODULE_NAME": %s : %d Invalid client family\n", __func__, __LINE__);
+      return TCP_SPLICE_MIN_IPA_HANDLE;
+    }
+    break;
+  }
+  ipa_socks_session_info.dl_out.dst_port = ntohs(splice_tuple->cli_dport);
+  ipa_socks_session_info.dl_out.src_port = ntohs(splice_tuple->cli_sk_num_ct);
+
+  ipa_socks_session_info.dl_out.in_irs = splice_tuple->req_irs;
+  ipa_socks_session_info.dl_out.in_iss = splice_tuple->req_iss;
+  ipa_socks_session_info.dl_out.out_irs = splice_tuple->cli_irs;
+  ipa_socks_session_info.dl_out.out_iss = splice_tuple->cli_iss;
+
+  if (session_info->rx_opt_timestamp_ok){
+    ipa_socks_session_info.dl_out.ipa_sockv5_mask |= IPA_SOCKSv5_OPT_TS;
+    ipa_socks_session_info.dl_out.out_ircv_tsval = splice_tuple->tstamp_option.cli_ircv_tsval;
+    ipa_socks_session_info.dl_out.out_ircv_tsecr = splice_tuple->tstamp_option.cli_ircv_tsecr;
+    ipa_socks_session_info.dl_out.in_ircv_tsecr = splice_tuple->tstamp_option.req_ircv_tsecr;
+    ipa_socks_session_info.dl_out.in_ircv_tsval = splice_tuple->tstamp_option.req_ircv_tsval;
+  }
+
+  if (session_info->rx_opt_wscale_ok){
+    ipa_socks_session_info.dl_out.ipa_sockv5_mask |= IPA_SOCKSv5_OPT_WS_DMC;
+    ipa_socks_session_info.dl_out.in_ircv_wscale = splice_tuple->wscale_option.req_ircv_wscale;
+    ipa_socks_session_info.dl_out.in_isnd_wscale = splice_tuple->wscale_option.req_isnd_wscale;
+    ipa_socks_session_info.dl_out.out_ircv_wscale = splice_tuple->wscale_option.cli_ircv_wscale;
+    ipa_socks_session_info.dl_out.out_isnd_wscale = splice_tuple->wscale_option.cli_isnd_wscale;
+  }
+
+  if (session_info->rx_opt_sack_ok)
+    ipa_socks_session_info.dl_out.ipa_sockv5_mask |= IPA_SOCKSv5_OPT_SACK;
+
+  /*fill IPA uC DL template*/
+  ipa_socks_session_info.ul_out.ipa_sockv5_mask |= IPA_SOCKSv5_ENTRY_VALID;
+  /* Update uC IP header template information*/
+  switch(splice_tuple->req_family){
+    case AF_INET:
+    {
+      /*Check PDN hash table and update accordingly*/
+      spin_lock_bh(&ht_pdn_lock);
+      hash_for_each_possible_rcu(tcp_splice_pdn_ht, pdn_hash_entry, hash_node, splice_tuple->req_daddr.v4_addr)
+      {
+        pdn_found = 1;
+        break;
+      }
+      if (!pdn_found && pdn_offload_size >= TCP_SPLICE_MAX_PDN_OFFLOAD) {
+        pr_err(MODULE_NAME": Max number of PDNs are offloaded. Not offloading this PDN\n");
+        return TCP_SPLICE_MIN_IPA_HANDLE;
+      }
+      if((pdn_hash_entry = kzalloc(sizeof(struct tcp_splice_pdn_hash_entry), GFP_ATOMIC)) == NULL)
+      {
+        pr_err(MODULE_NAME": %s kzalloc failed!\n", __func__);
+        spin_unlock_bh(&ht_pdn_lock);
+        return TCP_SPLICE_MIN_IPA_HANDLE;
+      }
+      pdn_hash_entry->daddr_family = splice_tuple->req_family;
+      pdn_hash_entry->daddr.v4_addr = splice_tuple->req_daddr.v4_addr;
+      pdn_hash_entry->req_dport = splice_tuple->req_dport;
+      pdn_hash_entry->req_sk_num = splice_tuple->req_sk_num;
+      hash_add_rcu(tcp_splice_pdn_ht, &(pdn_hash_entry->hash_node),splice_tuple->req_daddr.v4_addr);
+      pr_info(MODULE_NAME": inserted for key = 0x%x into PDN hash table\n", splice_tuple->req_daddr.v4_addr);
+      *pdn_hash_key = splice_tuple->req_daddr.v4_addr;
+      if (!pdn_found){
+        pdn_offload_size ++;
+      }
+      spin_unlock_bh(&ht_pdn_lock);
+
+      ipa_socks_session_info.ul_out.ipa_sockv5_mask |= IPA_SOCKSv5_IPV4;
+      ipa_socks_session_info.ul_out.ip_hdr.ipv4_rsv.ipv4_temp.daddr = splice_tuple->req_daddr.v4_addr;
+      ipa_socks_session_info.ul_out.ip_hdr.ipv4_rsv.ipv4_temp.saddr = splice_tuple->req_saddr.v4_addr;
+      ipa_socks_session_info.ul_out.ip_hdr.ipv4_rsv.ipv4_temp.ihl = 5;
+      ipa_socks_session_info.ul_out.ip_hdr.ipv4_rsv.ipv4_temp.protocol = IPPROTO_TCP;
+      ipa_socks_session_info.ul_out.ip_hdr.ipv4_rsv.ipv4_temp.version = 4;
+
+    }
+    break;
+    case AF_INET6:
+    {
+    ipa_socks_session_info.ul_out.ipa_sockv5_mask |= IPA_SOCKSv5_IPV6;
+      ipa_socks_session_info.ul_out.ip_hdr.ipv6_temp.daddr = splice_tuple->req_daddr.v6_addr;
+      ipa_socks_session_info.ul_out.ip_hdr.ipv6_temp.saddr = splice_tuple->req_saddr.v6_addr;
+      ipa_socks_session_info.ul_out.ip_hdr.ipv6_temp.version = 6;
+      ipa_socks_session_info.ul_out.ip_hdr.ipv6_temp.nexthdr = IPPROTO_TCP;
+    }
+    break;
+    default:
+    {
+      pr_err(MODULE_NAME": %s : %d Invalid client family\n", __func__, __LINE__);
+      return TCP_SPLICE_MIN_IPA_HANDLE;
+    }
+    break;
+  }
+  ipa_socks_session_info.ul_out.dst_port = ntohs(splice_tuple->req_dport);
+  ipa_socks_session_info.ul_out.src_port = ntohs(splice_tuple->req_sk_num_ct);
+
+  ipa_socks_session_info.ul_out.in_irs = splice_tuple->cli_irs;
+  ipa_socks_session_info.ul_out.in_iss = splice_tuple->cli_iss;
+  ipa_socks_session_info.ul_out.out_irs = splice_tuple->req_irs;
+  ipa_socks_session_info.ul_out.out_iss = splice_tuple->req_iss;
+
+  if (session_info->rx_opt_timestamp_ok){
+    ipa_socks_session_info.ul_out.ipa_sockv5_mask |= IPA_SOCKSv5_OPT_TS;
+    ipa_socks_session_info.ul_out.out_ircv_tsval = splice_tuple->tstamp_option.req_ircv_tsval;
+    ipa_socks_session_info.ul_out.out_ircv_tsecr = splice_tuple->tstamp_option.req_ircv_tsecr;
+    ipa_socks_session_info.ul_out.in_ircv_tsecr = splice_tuple->tstamp_option.cli_ircv_tsecr;
+    ipa_socks_session_info.ul_out.in_ircv_tsval = splice_tuple->tstamp_option.cli_ircv_tsval;
+  }
+
+  if (session_info->rx_opt_wscale_ok){
+    ipa_socks_session_info.ul_out.ipa_sockv5_mask |= IPA_SOCKSv5_OPT_WS_DMC;
+    ipa_socks_session_info.ul_out.in_ircv_wscale = splice_tuple->wscale_option.cli_ircv_wscale;
+    ipa_socks_session_info.ul_out.in_isnd_wscale = splice_tuple->wscale_option.cli_isnd_wscale;
+    ipa_socks_session_info.ul_out.out_ircv_wscale = splice_tuple->wscale_option.req_ircv_wscale;
+    ipa_socks_session_info.ul_out.out_isnd_wscale = splice_tuple->wscale_option.req_isnd_wscale;
+  }
+
+  if(session_info->rx_opt_sack_ok)
+    ipa_socks_session_info.ul_out.ipa_sockv5_mask |= IPA_SOCKSv5_OPT_SACK;
+
+  /*Fill IPACM info*/
+  switch(splice_tuple->req_family){
+    case AF_INET:
+    {
+      ipa_socks_session_info.dl_in.ip_type = IPA_IP_v4;
+      ipa_socks_session_info.dl_in.ipv4_dst = splice_tuple->req_saddr.v4_addr;
+      ipa_socks_session_info.dl_in.ipv4_src = splice_tuple->req_daddr.v4_addr;
+    }
+    break;
+    case AF_INET6:
+    {
+      ipa_socks_session_info.dl_in.ip_type = IPA_IP_v6;
+      memcpy(&ipa_socks_session_info.dl_in.ipv6_dst,&splice_tuple->req_saddr.v6_addr,sizeof(ipa_socks_session_info.dl_in.ipv6_dst));
+      memcpy(&ipa_socks_session_info.dl_in.ipv6_src,&splice_tuple->req_daddr.v6_addr,sizeof(ipa_socks_session_info.ul_in.ipv6_src));
+    }
+    break;
+    default:
+    {
+      pr_err(MODULE_NAME": %s : %d Invalid client family\n", __func__, __LINE__);
+      return TCP_SPLICE_MIN_IPA_HANDLE;
+    }
+    break;
+  }
+  ipa_socks_session_info.dl_in.src_port = ntohs(splice_tuple->req_dport);
+  ipa_socks_session_info.dl_in.dst_port = ntohs(splice_tuple->req_sk_num_ct);
+
+  switch(splice_tuple->cli_family){
+    case AF_INET:
+    {
+      ipa_socks_session_info.ul_in.ip_type = IPA_IP_v4;
+      ipa_socks_session_info.ul_in.ipv4_dst = splice_tuple->cli_saddr.v4_addr;
+      ipa_socks_session_info.ul_in.ipv4_src = splice_tuple->cli_daddr.v4_addr;
+    }
+    break;
+    case AF_INET6:
+    {
+      ipa_socks_session_info.ul_in.ip_type = IPA_IP_v6;
+      memcpy(&ipa_socks_session_info.ul_in.ipv6_dst,&splice_tuple->cli_saddr.v6_addr,sizeof(ipa_socks_session_info.ul_in.ipv6_dst));
+      memcpy(&ipa_socks_session_info.ul_in.ipv6_src,&splice_tuple->cli_daddr.v6_addr,sizeof(ipa_socks_session_info.ul_in.ipv6_src));
+    }
+    break;
+    default:
+    {
+      pr_err(MODULE_NAME": %s : %d Invalid client family\n", __func__, __LINE__);
+      return TCP_SPLICE_MIN_IPA_HANDLE;
+    }
+    break;
+  }
+  ipa_socks_session_info.ul_in.src_port = ntohs(splice_tuple->cli_dport);
+  ipa_socks_session_info.ul_in.dst_port = ntohs(splice_tuple->cli_sk_num);
+
+  /*Call IPA add function to add SOCKSv5 conn info*/
+  ipa_return_val = ipa_add_socksv5_conn(&ipa_socks_session_info);
+  if(ipa_return_val == TCP_SPLICE_IPA_OFFLOAD_SUCCESS){
+    ipa_handle = ipa_socks_session_info.handle;
+  }
+  else{
+    pr_debug(MODULE_NAME":returned failure from ipa_add_socksv5_conn() %d",ipa_return_val);
+  }
+
+  pr_debug(MODULE_NAME":Returning ipa_handle %d from AddIPASOCKSSession()",ipa_handle);
+  return ipa_handle;
+}
+
+/***************************************************************************
+*
+* Function: DeleteIPASOCKSSession
+*
+* Description: Configures IPA with SOCKSv5 session info
+*
+* Parameters: struct tcp_splice_tuple splice_tuple; //ptr to tcp splice tuple
+*
+* Return: void
+*
+***************************************************************************/
+void DeleteIPASOCKSSession(int ipa_handle)
+{
+  if (ipa_handle <= TCP_SPLICE_MIN_IPA_HANDLE){
+      pr_err(MODULE_NAME": %s : %d ipa_handle is 0\n", __func__, __LINE__);
+      return -1;
+  }
+    return ipa_del_socksv5_conn(ipa_handle);
+}
+#endif

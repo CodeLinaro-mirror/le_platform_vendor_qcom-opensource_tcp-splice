@@ -62,6 +62,18 @@ struct sockaddr_nl userspace_addr;
 DEFINE_HASHTABLE(tcp_splice_ht, TCP_SPLICE_HASH_INDEX_SHIFT_SIZE);
 spinlock_t ht_lock;
 
+DEFINE_HASHTABLE(tcp_splice_pdn_ht, TCP_SPLICE_PDN_HASH_INDEX_SHIFT_SIZE);
+unsigned int pdn_offload_size;
+spinlock_t ht_pdn_lock;
+
+#ifdef IPA_SOCKsv5_ADD_COM_ID
+struct worker{
+  int ipa_handle;
+  struct work_struct tcp_splice_ipa_wq;
+};
+struct worker ipa_worker;
+static void tcp_splice_del_ipa_offload(struct work_struct *work);
+#endif
 /***************************************************************************
 *
 * Function: tcp_splice_init
@@ -94,9 +106,14 @@ static int __init tcp_splice_init(void)
   }
 
   spin_lock_init(&ht_lock);
-
+  spin_lock_init(&ht_pdn_lock);
   hash_init(tcp_splice_ht);
+  hash_init(tcp_splice_pdn_ht);
+  pdn_offload_size = 0;
 
+#ifdef IPA_SOCKsv5_ADD_COM_ID
+  INIT_WORK(&ipa_worker.tcp_splice_ipa_wq, tcp_splice_del_ipa_offload);
+#endif
   //necessary for the zeroing out of the struct list_head list member
   memset(&pre_hook_v4, 0, sizeof(struct nf_hook_ops));
   memset(&fwd_hook_v4, 0, sizeof(struct nf_hook_ops));
@@ -222,6 +239,7 @@ static void __exit tcp_splice_exit(void)
 {
   int i;
   struct tcp_splice_hash_entry* hash_entry = NULL;
+  struct tcp_splice_pdn_hash_entry *pdn_hash_entry = NULL;
 
   pr_info(MODULE_NAME": cleaning up...\n");
 
@@ -241,6 +259,17 @@ static void __exit tcp_splice_exit(void)
   }
   spin_unlock_bh(&ht_lock);
 
+  spin_lock_bh(&ht_pdn_lock);
+  hash_for_each_rcu(tcp_splice_pdn_ht, i, pdn_hash_entry, hash_node)
+  {
+    hash_del_rcu(&(pdn_hash_entry->hash_node));
+    call_rcu(&(pdn_hash_entry->rcu), tcp_splice_pdn_ht_free_entry);
+  }
+  pdn_offload_size = 0;
+  spin_unlock_bh(&ht_pdn_lock);
+#ifdef IPA_SOCKsv5_ADD_COM_ID
+  cancel_work_sync(&ipa_worker.tcp_splice_ipa_wq);
+#endif
   rcu_barrier(); //wait for all call_rcu callbacks to complete before exiting
 
   proc_remove(proc_file);
@@ -248,7 +277,27 @@ static void __exit tcp_splice_exit(void)
   pr_info(MODULE_NAME": finished clean up...\n");
   return;
 }
+#ifdef IPA_SOCKsv5_ADD_COM_ID
+/***************************************************************************
+*
+* Function: tcp_splice_del_ipa_offload
+*
+* Description: Work function for delete IPA offload
+*
+* Parameters: struct work_struct *work
+*
+* Return: none
+*
+***************************************************************************/
+static void tcp_splice_del_ipa_offload(struct work_struct *work)
+{
+  struct worker *ipa_worker_handle;
 
+  ipa_worker_handle = container_of(work,struct worker,tcp_splice_ipa_wq);
+  pr_debug(MODULE_NAME":in IPA Work queue with ipa_handle %d\n",ipa_worker_handle->ipa_handle);
+  DeleteIPASOCKSSession(ipa_worker_handle->ipa_handle);
+}
+#endif
 /***************************************************************************
 *
 * Function: tcp_splice_proc_read_cb
@@ -388,6 +437,10 @@ unsigned int pre_route_v4(unsigned int hooknum, struct sk_buff* skb, const struc
   struct iphdr* ip_hdr = (struct iphdr*)skb_network_header(skb); //get L3 info;
   struct tcphdr* tcp_hdr;
   struct tcp_splice_hash_entry* hash_entry;
+#ifdef ISKERNEL4_14
+  enum ip_conntrack_info ctinfo;
+  struct nf_conn *ct;
+#endif
 
   //match on TCP, and IPv4 should already be matched on when registering
   if(ip_hdr->protocol == IPPROTO_TCP)
@@ -485,7 +538,13 @@ unsigned int pre_route_v4(unsigned int hooknum, struct sk_buff* skb, const struc
             //check for fin or rst
             check_for_fin_rst_tcp_splice(tcp_hdr, rcu_dereference(hash_entry));
 
-            if(local_out_v6(skb))
+#ifdef ISKERNEL4_14
+            ctinfo = IP_CT_ESTABLISHED_REPLY;
+            nf_ct_set(skb, ct, ctinfo);
+#else
+            skb->nfctinfo = IP_CT_ESTABLISHED_REPLY;
+#endif
+			if(local_out_v6(skb))
             {
               pr_debug(MODULE_NAME": %s, error with local_out_v6\n", __func__);
             }
@@ -1157,16 +1216,51 @@ void ip_splice_v6_to_v4(unsigned int v4_daddr, unsigned int v4_saddr, unsigned s
 void check_for_fin_rst_tcp_splice(struct tcphdr* tcp_hdr, struct tcp_splice_hash_entry* hash_entry)
 {
   struct tcp_splice_hash_entry* temp_node = NULL;
+  struct tcp_splice_pdn_hash_entry* temp_pdn_node = NULL;
+  struct tcp_splice_pdn_hash_entry* temp_pdn_search_node = NULL;
+  int pdn_found = 0;
 
   if(tcp_hdr->fin || tcp_hdr->rst)
   {
-    pr_debug(MODULE_NAME": received FIN or RST!\n");
+    pr_info(MODULE_NAME": received FIN or RST!\n");
 
     spin_lock(&ht_lock);
 
     //notify userpsace to close the fds
     sendToUserspace(hash_entry);
+#ifdef IPA_SOCKsv5_ADD_COM_ID
+    //Delete IPA socksv5 information if configured.
+    if (hash_entry->ipa_handle > TCP_SPLICE_MIN_IPA_HANDLE) {
+      pr_debug(MODULE_NAME":Delete hash entry with ipa handle %d, Schedule work \n",hash_entry->ipa_handle);
+      ipa_worker.ipa_handle = hash_entry->ipa_handle;
+      schedule_work(&ipa_worker.tcp_splice_ipa_wq);
+    }
+#endif
+    if (hash_entry->pdn_hash_key) {
+      spin_lock(&ht_pdn_lock);
 
+      //delete the hash entry for opposite direction
+      hash_for_each_possible_rcu(tcp_splice_pdn_ht, temp_pdn_node, hash_node, hash_entry->pdn_hash_key)
+      {
+        if ((temp_pdn_node->req_dport == hash_entry->splice_tuple.req_dport) &&
+            (temp_pdn_node->req_sk_num == hash_entry->splice_tuple.req_sk_num))
+        {
+          hash_del_rcu(&(temp_pdn_node->hash_node));
+          break;       
+        }
+      }
+
+      hash_for_each_possible_rcu(tcp_splice_pdn_ht, temp_pdn_search_node, hash_node, hash_entry->pdn_hash_key)
+      {
+        pdn_found = 1;
+        break;
+      }
+	    if (!pdn_found)
+      {
+        pdn_offload_size--;
+	    }
+      spin_unlock(&ht_pdn_lock);
+    }
     //delete the hash entry for opposite direction
     hash_for_each_possible_rcu(tcp_splice_ht, temp_node, hash_node, hash_entry->opp_key)
     {
@@ -1189,6 +1283,11 @@ void check_for_fin_rst_tcp_splice(struct tcphdr* tcp_hdr, struct tcp_splice_hash
       call_rcu(&(temp_node->rcu), tcp_splice_ht_free_entry);
     }
 
+    if(NULL != temp_pdn_node)
+    {
+      call_rcu(&(temp_pdn_node->rcu), tcp_splice_pdn_ht_free_entry);
+    }
+
     call_rcu(&(hash_entry->rcu), tcp_splice_ht_free_entry);
   }
 
@@ -1209,6 +1308,23 @@ void check_for_fin_rst_tcp_splice(struct tcphdr* tcp_hdr, struct tcp_splice_hash
 void tcp_splice_ht_free_entry(struct rcu_head* head)
 {
   kfree(container_of(head, struct tcp_splice_hash_entry, rcu));
+  return;
+}
+
+/***************************************************************************
+*
+* Function: tcp_splice_pdn_ht_free_entry
+*
+* Description: frees struct tcp_splice_pdn_hash_entry* hash_entry, is a call_rcu callback
+*
+* Parameters:  struct rcu_head* head //ptr to rcu_head member in hash_entry
+*
+* Return: none
+*
+***************************************************************************/
+void tcp_splice_pdn_ht_free_entry(struct rcu_head* head)
+{
+  kfree(container_of(head, struct tcp_splice_pdn_hash_entry, rcu));
   return;
 }
 

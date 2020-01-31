@@ -263,3 +263,16 @@ void check_for_fin_rst_tcp_splice(struct tcphdr* tcp_hdr, struct tcp_splice_hash
 *
 ***************************************************************************/
 void tcp_splice_ht_free_entry(struct rcu_head* head);
+
+/***************************************************************************
+*
+* Function: tcp_splice_pdn_ht_free_entry
+*
+* Description: frees struct tcp_splice_pdn_hash_entry* hash_entry, is a call_rcu callback
+*
+* Parameters:  struct rcu_head* head //ptr to rcu_head member in hash_entry
+*
+* Return: none
+*
+***************************************************************************/
+void tcp_splice_pdn_ht_free_entry(struct rcu_head* head);
