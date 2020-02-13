@@ -139,8 +139,8 @@ static int __init tcp_splice_init(void)
  #endif
   pre_hook_v4.pf = NFPROTO_IPV4; //match on IPV4 pkts
   pre_hook_v4.hooknum = NF_INET_PRE_ROUTING; //hook into the PRE_ROUTING
-  hook_priority = NF_IP_PRI_NAT_DST; //specifying that we are DNAT priority
-  //hook_priority = NF_IP_PRI_FIRST;
+  //hook_priority = NF_IP_PRI_NAT_DST; //specifying that we are DNAT priority
+  hook_priority = NF_IP_PRI_FILTER;
   pre_hook_v4.priority = hook_priority;
 
   if(REGISTER_HOOKS(pre_hook_v4) != 0)
