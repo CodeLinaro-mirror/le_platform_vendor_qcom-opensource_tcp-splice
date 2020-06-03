@@ -150,6 +150,7 @@ struct tcp_splice_hash_entry
   struct tcp_splice_session_info session_info;
   struct tcp_splice_tuple splice_tuple;
   unsigned int opp_key; //key to the opposing direction hash entry
+  int fin_recvd;
   int ipa_handle;
   unsigned int pdn_hash_key;
 };

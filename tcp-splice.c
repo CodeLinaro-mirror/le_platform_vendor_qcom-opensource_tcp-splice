@@ -1220,9 +1220,31 @@ void check_for_fin_rst_tcp_splice(struct tcphdr* tcp_hdr, struct tcp_splice_hash
   struct tcp_splice_pdn_hash_entry* temp_pdn_search_node = NULL;
   int pdn_found = 0;
 
+  if(tcp_hdr->fin)
+  {
+    spin_lock(&ht_lock);
+    hash_entry->fin_recvd = 1;
+    hash_for_each_possible_rcu(tcp_splice_ht, temp_node, hash_node, hash_entry->opp_key)
+    {
+      if((hash_entry->splice_tuple.cli_dport == temp_node->splice_tuple.cli_dport) &&
+         (hash_entry->splice_tuple.cli_sk_num_ct == temp_node->splice_tuple.cli_sk_num_ct) &&
+         (hash_entry->splice_tuple.req_dport == temp_node->splice_tuple.req_dport) &&
+         (hash_entry->splice_tuple.req_sk_num_ct == temp_node->splice_tuple.req_sk_num_ct))
+      {
+        if (!temp_node->fin_recvd)
+        {
+          pr_info("Fin is received on one direction, but not on the opposite diretion. Not cleaning up the socket.\n");
+          spin_unlock(&ht_lock);
+          return;
+        }
+      }
+    }
+    spin_unlock(&ht_lock);
+  }
+
   if(tcp_hdr->fin || tcp_hdr->rst)
   {
-    pr_info(MODULE_NAME": received FIN or RST!\n");
+    pr_info(MODULE_NAME": received FIN %d or RST %d!\n",tcp_hdr->fin,tcp_hdr->rst);
 
     spin_lock(&ht_lock);
 
