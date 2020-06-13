@@ -690,6 +690,7 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
     pr_debug(MODULE_NAME":Insert hash entry with ipa handle %d",ipa_handle);
     hash_entry->ipa_handle = ipa_handle;
     hash_entry->pdn_hash_key = pdn_hash_key;
+    hash_entry->fin_recvd = 0;
     spin_lock_bh(&ht_lock);
     hash_add_rcu(tcp_splice_ht, &(hash_entry->hash_node), key[i]);
     spin_unlock_bh(&ht_lock);
