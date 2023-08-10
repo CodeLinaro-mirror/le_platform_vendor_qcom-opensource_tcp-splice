@@ -263,5 +263,5 @@ int AddIPASOCKSSession(struct tcp_splice_tuple *splice_tuple,
 * Return: void
 *
 ***************************************************************************/
-void DeleteIPASOCKSSession(int ipa_handle);
+int DeleteIPASOCKSSession(int ipa_handle);
 #endif

@@ -1066,7 +1066,7 @@ int AddIPASOCKSSession(struct tcp_splice_tuple *splice_tuple,
 * Return: void
 *
 ***************************************************************************/
-void DeleteIPASOCKSSession(int ipa_handle)
+int DeleteIPASOCKSSession(int ipa_handle)
 {
   if (ipa_handle <= TCP_SPLICE_MIN_IPA_HANDLE){
       pr_err(MODULE_NAME": %s : %d ipa_handle is 0\n", __func__, __LINE__);
