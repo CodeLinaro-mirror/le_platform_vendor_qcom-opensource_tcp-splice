@@ -206,7 +206,11 @@ void sendToUserspace(struct tcp_splice_hash_entry* hash_entry);
 *         -1, otherwise
 *
 ***************************************************************************/
+#ifdef ISKERNEL5_15
+int tcp_splice_socket(struct sock* sk, int optval, sockptr_t arg, unsigned int len);
+#else
 int tcp_splice_socket(struct sock* sk, int optval, void __user *user, unsigned int len);
+#endif
 
 /***************************************************************************
 *

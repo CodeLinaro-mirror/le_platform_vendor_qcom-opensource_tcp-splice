@@ -150,7 +150,11 @@ void sendToUserspace(struct tcp_splice_hash_entry* hash_entry)
 *        -1, otherwise
 *
 ***************************************************************************/
+#ifdef ISKERNEL5_15
+int tcp_splice_socket(struct sock* sk, int optval, sockptr_t arg, unsigned int len)
+#else
 int tcp_splice_socket(struct sock* sk, int optval, void __user *user, unsigned int len)
+#endif
 {
   int err = 0;
   struct tcp_splice_session_info splice_session_info;
@@ -159,7 +163,11 @@ int tcp_splice_socket(struct sock* sk, int optval, void __user *user, unsigned i
   {
     pr_err(MODULE_NAME": %s sock NULL!\n", __func__);
     return -EINVAL;
+#ifdef ISKERNEL5_15
+  } else if(NULL == arg.user)
+#else
   } else if(NULL == user)
+#endif
   {
     pr_err(MODULE_NAME": %s user NULL!\n", __func__);
     return -EINVAL;
@@ -172,7 +180,11 @@ int tcp_splice_socket(struct sock* sk, int optval, void __user *user, unsigned i
     {
       //copy_from_user and not using netlink socket because filling out the socket
       //splice info needs to be scheduled now
+#ifdef ISKERNEL5_15
+      if(copy_from_user(&(splice_session_info.r_session), arg.user, len) != 0)
+#else
       if(copy_from_user(&(splice_session_info.r_session), user, len) != 0)
+#endif
       {
         pr_err(MODULE_NAME": %s error copying from userspace\n", __func__);
         return -EINVAL;
