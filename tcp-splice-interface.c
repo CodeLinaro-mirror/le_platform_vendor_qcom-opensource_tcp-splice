@@ -857,6 +857,13 @@ int AddIPASOCKSSession(struct tcp_splice_tuple *splice_tuple,
     ipa_socks_session_info.dl_out.cmd_id = IPA_SOCKsv5_ADD_COM_ID;
     ipa_socks_session_info.dl_out.cmd_param = IPA_SOCKsv5_ADD_V4_V6_COM_PM;
   }
+  else if (splice_tuple->cli_family == AF_INET6 && splice_tuple->req_family == AF_INET6){
+    pr_info(MODULE_NAME":v6 <-> v6 translation, call IPA offload\n");
+    ipa_socks_session_info.ul_out.cmd_id = IPA_SOCKsv5_ADD_COM_ID;
+    ipa_socks_session_info.ul_out.cmd_param = IPA_SOCKsv5_ADD_V6_V6_COM_PM;
+    ipa_socks_session_info.dl_out.cmd_id = IPA_SOCKsv5_ADD_COM_ID;
+    ipa_socks_session_info.dl_out.cmd_param = IPA_SOCKsv5_ADD_V6_V6_COM_PM;
+  }
   else{
     pr_err(MODULE_NAME":IPA offload not supported for this translation\n");
     return TCP_SPLICE_MIN_IPA_HANDLE;
