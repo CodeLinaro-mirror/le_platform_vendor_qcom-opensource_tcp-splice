@@ -45,7 +45,11 @@
 #endif
 
 static struct proc_dir_entry* proc_file = NULL;
+#ifdef ISKERNEL5_15
+static struct proc_ops proc_file_ops;
+#else
 static struct file_operations proc_file_ops;
+#endif
 
 static struct nf_sockopt_ops tcp_splice_sockopt_hook;
 
@@ -92,13 +96,23 @@ static int __init tcp_splice_init(void)
   enum nf_ip_hook_priorities hook_priority;
 
   //define proc file and operations
+#ifdef ISKERNEL5_15
+  memset(&proc_file_ops, 0, sizeof(struct proc_ops));
+#else
   memset(&proc_file_ops, 0, sizeof(struct file_operations));
+#endif
 
-#ifndef ISKERNELABOVE_4_9
+#ifdef ISKERNEL5_15
+  proc_file_ops.proc_read = tcp_splice_proc_read_cb;
+  proc_file_ops.proc_write = tcp_splice_proc_write_cb;
+#else
+#ifdef ISKERNELABOVE_4_9
   proc_file_ops.owner = THIS_MODULE;
 #endif
   proc_file_ops.read =  tcp_splice_proc_read_cb;
   proc_file_ops.write = tcp_splice_proc_write_cb;
+#endif
+
   if((proc_file = proc_create(PROC_FILE_NAME, 0, init_net.proc_net, &proc_file_ops)) == NULL)
   {
     pr_err(MODULE_NAME": error creating proc entry!\n");
@@ -291,11 +305,16 @@ static void __exit tcp_splice_exit(void)
 ***************************************************************************/
 static void tcp_splice_del_ipa_offload(struct work_struct *work)
 {
+  int ret = 0;
   struct worker *ipa_worker_handle;
 
   ipa_worker_handle = container_of(work,struct worker,tcp_splice_ipa_wq);
   pr_debug(MODULE_NAME":in IPA Work queue with ipa_handle %d\n",ipa_worker_handle->ipa_handle);
-  DeleteIPASOCKSSession(ipa_worker_handle->ipa_handle);
+  ret =DeleteIPASOCKSSession(ipa_worker_handle->ipa_handle);
+  if(ret < 0)
+  {
+    pr_err(MODULE_NAME": %s : %d DeleteIPASOCKSSession failed.\n", __func__, __LINE__);
+  }
 }
 #endif
 /***************************************************************************
@@ -446,7 +465,7 @@ unsigned int pre_route_v4(unsigned int hooknum, struct sk_buff* skb, const struc
   if(ip_hdr->protocol == IPPROTO_TCP)
   {
     //sanity check to prevent overflow
-    if((skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl))) >= skb->tail)
+    if(skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)) >= skb_tail_pointer(skb))
     {
       pr_debug(MODULE_NAME": %s bad ip header\n", __func__);
       return NF_DROP;
@@ -599,7 +618,7 @@ unsigned int local_out_v4(struct sk_buff* skb)
   struct tcphdr* tcp_hdr;
 
   //sanity check to prevent overflow
-  if((skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl))) >= skb->tail)
+  if(skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)) >= skb_tail_pointer(skb))
   {
     pr_debug(MODULE_NAME": %s bad ip header\n", __func__);
     kfree_skb(skb);
@@ -680,7 +699,7 @@ unsigned int forward_v4(unsigned int hooknum, struct sk_buff* skb, const struct 
   if(ip_hdr->protocol == IPPROTO_TCP)
   {
     //sanity check to prevent overflow
-    if((skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl))) >= skb->tail)
+    if(skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)) >= skb_tail_pointer(skb))
     {
       pr_debug(MODULE_NAME": %s bad ip header\n", __func__);
       return NF_DROP;
@@ -744,7 +763,7 @@ unsigned int post_route_v4(unsigned int hooknum, struct sk_buff* skb, const stru
   if(ip_hdr->protocol == IPPROTO_TCP)
   {
     //sanity check to prevent overflow
-    if((skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl))) >= skb->tail)
+    if(skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)) >= skb_tail_pointer(skb))
     {
       pr_debug(MODULE_NAME": %s bad ip header\n", __func__);
       return NF_DROP;
@@ -833,7 +852,7 @@ unsigned int pre_route_v6(unsigned int hooknum, struct sk_buff* skb, const struc
   if(ip_hdr->nexthdr == IPPROTO_TCP)
   {
     //sanity check to prevent overflow
-    if((skb->data + sizeof(struct ipv6hdr)) >= skb->tail)
+    if((skb->data + sizeof(struct ipv6hdr)) >= skb_tail_pointer(skb))
     {
       pr_debug(MODULE_NAME": %s bad ip header\n", __func__);
       return NF_DROP;
@@ -1018,7 +1037,7 @@ unsigned int local_out_v6(struct sk_buff* skb)
   struct tcphdr* tcp_hdr;
 
   //sanity check to prevent overflow
-  if((skb->data + sizeof(struct ipv6hdr)) >= skb->tail)
+  if(skb->data + sizeof(struct ipv6hdr) >= skb_tail_pointer(skb))
   {
     pr_debug(MODULE_NAME": %s bad ip header\n", __func__);
     kfree_skb(skb);
@@ -1079,7 +1098,7 @@ void ip_splice_v4_to_v6(struct in6_addr v6_daddr, struct in6_addr v6_saddr,
   ip_hdr = (struct iphdr*)skb_network_header(skb); //get location of L3 hdr;
 
   //sanity check to prevent overflow
-  if((skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl))) >= skb->tail)
+  if(skb->data + (IPV4_HDR_LEN_BYTES(ip_hdr->ihl)) >= skb_tail_pointer(skb))
   {
     pr_debug(MODULE_NAME": %s bad ip header\n", __func__);
     return;
@@ -1157,7 +1176,7 @@ void ip_splice_v6_to_v4(unsigned int v4_daddr, unsigned int v4_saddr, unsigned s
   }
 
   //sanity check to prevent overflow
-  if((skb->data + sizeof(struct ipv6hdr)) >= skb->tail)
+  if(skb->data + sizeof(struct ipv6hdr) >= skb_tail_pointer(skb))
   {
     pr_debug(MODULE_NAME": %s bad ip header\n", __func__);
     return;

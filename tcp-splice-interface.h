@@ -206,7 +206,11 @@ void sendToUserspace(struct tcp_splice_hash_entry* hash_entry);
 *         -1, otherwise
 *
 ***************************************************************************/
+#ifdef ISKERNEL5_15
+int tcp_splice_socket(struct sock* sk, int optval, sockptr_t arg, unsigned int len);
+#else
 int tcp_splice_socket(struct sock* sk, int optval, void __user *user, unsigned int len);
+#endif
 
 /***************************************************************************
 *
@@ -263,5 +267,5 @@ int AddIPASOCKSSession(struct tcp_splice_tuple *splice_tuple,
 * Return: void
 *
 ***************************************************************************/
-void DeleteIPASOCKSSession(int ipa_handle);
+int DeleteIPASOCKSSession(int ipa_handle);
 #endif
