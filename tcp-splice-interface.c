@@ -710,9 +710,6 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
 
   }
 
-  //clean up
-  nf_ct_put(req_ct);
-
   return 0;
 }
 
