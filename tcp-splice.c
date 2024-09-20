@@ -454,11 +454,11 @@ unsigned int pre_route_v4(unsigned int hooknum, struct sk_buff* skb, const struc
                           const struct net_device* out, int (*okfn)(struct sk_buff*))
 {
   struct iphdr* ip_hdr = (struct iphdr*)skb_network_header(skb); //get L3 info;
-  struct tcphdr* tcp_hdr;
-  struct tcp_splice_hash_entry* hash_entry;
+  struct tcphdr* tcp_hdr = NULL;
+  struct tcp_splice_hash_entry* hash_entry = NULL;
 #ifdef ISKERNEL4_14
   enum ip_conntrack_info ctinfo;
-  struct nf_conn *ct;
+  struct nf_conn *ct = NULL;
 #endif
 
   //match on TCP, and IPv4 should already be matched on when registering
