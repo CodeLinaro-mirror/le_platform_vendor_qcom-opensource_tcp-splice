@@ -252,7 +252,7 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
   unsigned char i;
   int j, ipa_handle = TCP_SPLICE_MIN_IPA_HANDLE;
   unsigned int rcv_queue_bytes;
-  unsigned int key[2]; //first key will be for client, second key for req
+  unsigned int key[2] = {0}; //first key will be for client, second key for req
   struct nf_conntrack_tuple conn_tuple[2]; //index 0 for client, index 1 for req
   struct sk_buff* skb;
   struct nf_conntrack_tuple_hash* cli_conn_hash = NULL;
@@ -516,7 +516,15 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
     hash_entry->splice_tuple.cli_family = sp_session->cli_socket->sk->sk_family;
     hash_entry->splice_tuple.cli_dport = sp_session->cli_socket->sk->sk_dport;
     hash_entry->splice_tuple.cli_sk_num = htons(sp_session->cli_socket->sk->sk_num);
-    hash_entry->splice_tuple.cli_sk_num_ct = cli_ct->tuplehash[0].tuple.dst.u.tcp.port;
+    if(cli_ct == NULL)
+    {
+      pr_err(MODULE_NAME": %s client conntrack is NULL\n", __func__);
+      if(req_ct != NULL)
+        nf_ct_put(req_ct); //clean up
+      return -EBADF;
+    }
+    else
+      hash_entry->splice_tuple.cli_sk_num_ct = cli_ct->tuplehash[0].tuple.dst.u.tcp.port;
     hash_entry->splice_tuple.cli_iss = cli_tcp_sock->snd_nxt;
     hash_entry->splice_tuple.cli_irs = cli_tcp_sock->rcv_nxt;
 
@@ -524,9 +532,6 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
     if((hash_entry->splice_tuple.cli_dst = sk_dst_get(sp_session->cli_socket->sk)) == NULL)
     {
       pr_err(MODULE_NAME": sk_dst_get returned NULL for cli socket\n");
-      nf_ct_put(cli_ct); //clean up
-      nf_ct_put(req_ct); //clean up
-
       if(i)
       {
         //delete and free the other previous hash_entry
@@ -549,6 +554,8 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
       } else {
         kfree(hash_entry);
       }
+      nf_ct_put(cli_ct); //clean up
+      nf_ct_put(req_ct); //clean up
       return -EBADF;
     }
 
@@ -580,8 +587,15 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
 
     hash_entry->splice_tuple.req_dport = sp_session->req_socket->sk->sk_dport;
     hash_entry->splice_tuple.req_sk_num = htons(sp_session->req_socket->sk->sk_num);
-    hash_entry->splice_tuple.req_sk_num_ct = req_ct->tuplehash[1].tuple.dst.u.tcp.port;
-
+    if(req_ct == NULL)
+    {
+      pr_err(MODULE_NAME": %s req conntrack is NULL\n", __func__);
+      if(cli_ct != NULL)
+        nf_ct_put(cli_ct); //clean up
+      return -EBADF;
+    }
+    else
+      hash_entry->splice_tuple.req_sk_num_ct = req_ct->tuplehash[1].tuple.dst.u.tcp.port;
     j = sp_session->cli_socket->sk->sk_receive_queue.qlen;
     rcv_queue_bytes = 0;
     skb = sp_session->cli_socket->sk->sk_receive_queue.next;
@@ -601,9 +615,6 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
     if((hash_entry->splice_tuple.req_dst = sk_dst_get(sp_session->req_socket->sk)) == NULL)
     {
       pr_err(MODULE_NAME": %s sk_dst_get returned NULL for req socket\n", __func__);
-      nf_ct_put(cli_ct); //clean up
-      nf_ct_put(req_ct); //clean up
-
       if(i)
       {
         //delete and free the other previous hash_entry
@@ -626,6 +637,8 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
       } else {
         kfree(hash_entry);
       }
+      nf_ct_put(cli_ct); //clean up
+      nf_ct_put(req_ct); //clean up
       return -EBADF;
     }
 
