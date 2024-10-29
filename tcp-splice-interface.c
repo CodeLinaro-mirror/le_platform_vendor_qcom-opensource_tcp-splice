@@ -37,211 +37,18 @@
 extern int debug_mode;
 extern struct sock* nl_socket;
 extern struct sockaddr_nl userspace_addr;
-extern struct hlist_head tcp_splice_ht[1 << TCP_SPLICE_HASH_INDEX_SHIFT_SIZE];
+extern struct hlist_head tcp_splice_ht[1U << TCP_SPLICE_HASH_INDEX_SHIFT_SIZE];
 extern spinlock_t ht_lock;
-extern struct hlist_head tcp_splice_pdn_ht[1 << TCP_SPLICE_PDN_HASH_INDEX_SHIFT_SIZE];
+extern struct hlist_head tcp_splice_pdn_ht[1U << TCP_SPLICE_PDN_HASH_INDEX_SHIFT_SIZE];
 extern unsigned int pdn_offload_size;
 extern spinlock_t ht_pdn_lock;
-/***************************************************************************
-*
-* Function: listenFromUserspace
-*
-* Description: callback for listening to netlink msgs from userspace
-*
-* Parameters: struct sk_buff* skb; //skb for netlink msg
-*
-* Return: none
-*
-***************************************************************************/
-void listenFromUserspace(struct sk_buff* skb)
-{
-  struct nlmsghdr* nlh;
-
-  if(NULL == skb)
-  {
-    pr_debug(MODULE_NAME": %s skb NULL!\n", __func__);
-    return;
-  }
-
-  nlh = (struct nlmsghdr*)skb->data;
-
-  pr_info(MODULE_NAME": %s received netlink msg from userspace pid: %u\n", __func__,
-          nlh->nlmsg_pid);
-
-  userspace_addr.nl_pid = nlh->nlmsg_pid;
-
-  return;
-}
-
-/***************************************************************************
-*
-* Function: sendToUserspace
-*
-* Description: send netlink msg to userspace that the socket pair fd has
-*              seen a FIN or RST
-*
-* Parameters: struct tcp_splice_hash_entry* hash_entry; //socket pair fd
-*
-* Return: none
-*
-***************************************************************************/
-void sendToUserspace(struct tcp_splice_hash_entry* hash_entry)
-{
-  struct nlmsghdr* nlmhdr;
-  struct sk_buff* skb;
-  struct userspace_relay_session* data_ptr;
-
-  if(NULL == hash_entry)
-  {
-    pr_debug(MODULE_NAME": %s hash_entry NULL!\n", __func__);
-    return;
-  }
-
-  //allocate new skb, nlmsg_unicast takes care of the freeing
-  if((skb = nlmsg_new(sizeof(struct userspace_relay_session), GFP_ATOMIC)) == NULL)
-  {
-    pr_debug(MODULE_NAME": %s skb NULL!\n", __func__);
-    return;
-  }
-
-  //attach the payload to the skb
-  if((nlmhdr = nlmsg_put(skb, 0, 0, NLMSG_DONE, sizeof(struct userspace_relay_session), 0)) == NULL)
-  {
-    pr_debug(MODULE_NAME": %s nlmhdr NULL!\n", __func__);
-    kfree_skb(skb);
-    return;
-  }
-
-  //we're not multicast
-  NETLINK_CB(skb).dst_group = 0;
-
-  //ptr to the head of the payload
-  if((data_ptr = (struct userspace_relay_session*)NLMSG_DATA(nlmhdr)) == NULL)
-  {
-    pr_debug(MODULE_NAME": %s data_ptr NULL!\n", __func__);
-    kfree_skb(skb);
-    return;
-  }
-
-  *data_ptr = hash_entry->session_info.r_session;
-
-  if(nlmsg_unicast(nl_socket, skb, userspace_addr.nl_pid) < 0)
-  {
-    pr_err(MODULE_NAME": %s error sending netlink msg to userspace\n", __func__);
-  }
-
-  pr_debug(MODULE_NAME": %s notification of FIN socket pair sent to userspace\n",__func__);
-
-  return;
-}
-
-/***************************************************************************
-*
-* Function: tcp_splice_socket
-*
-* Description: callback for setsockopt SO_TCP_SPLICE
-*
-* Parameters: struct sock* sk; //socket fd
-*             int optval; option value
-*             void __user *user; user data
-*             unsigned int len; option length
-*
-* Return: 0, success
-*        -1, otherwise
-*
-***************************************************************************/
-#ifdef ISKERNEL5_15
-int tcp_splice_socket(struct sock* sk, int optval, sockptr_t arg, unsigned int len)
-#else
-int tcp_splice_socket(struct sock* sk, int optval, void __user *user, unsigned int len)
-#endif
-{
-  int err = 0;
-  struct tcp_splice_session_info splice_session_info;
-
-  if(NULL == sk)
-  {
-    pr_err(MODULE_NAME": %s sock NULL!\n", __func__);
-    return -EINVAL;
-#ifdef ISKERNEL5_15
-  } else if(NULL == arg.user)
-#else
-  } else if(NULL == user)
-#endif
-  {
-    pr_err(MODULE_NAME": %s user NULL!\n", __func__);
-    return -EINVAL;
-  }
-
-  //not checking for capabilities of user
-  switch(optval)
-  {
-    case SO_TCP_SPLICE:
-    {
-      //copy_from_user and not using netlink socket because filling out the socket
-      //splice info needs to be scheduled now
-#ifdef ISKERNEL5_15
-      if(copy_from_user(&(splice_session_info.r_session), arg.user, len) != 0)
-#else
-      if(copy_from_user(&(splice_session_info.r_session), user, len) != 0)
-#endif
-      {
-        pr_err(MODULE_NAME": %s error copying from userspace\n", __func__);
-        return -EINVAL;
-      }
-
-      if((splice_session_info.cli_socket = sockfd_lookup(splice_session_info.r_session.cli_fd,
-                                                          &err)) == NULL)
-      {
-        pr_err(MODULE_NAME": %s error looking up client socket from given userspace fd: "
-              "%d\n", __func__, err);
-        return -EBADF;
-      }
-      sockfd_put(splice_session_info.cli_socket);
-
-      if((splice_session_info.req_socket = sockfd_lookup(splice_session_info.r_session.req_fd,
-                                                          &err)) == NULL)
-      {
-
-        pr_err(MODULE_NAME": %s error looking up req socket from given userspace fd: "
-              "%d\n", __func__, err);
-        return -EBADF;
-      }
-      sockfd_put(splice_session_info.req_socket);
-
-      if(debug_mode)
-      {
-        printSessionInfo(&splice_session_info);
-      }
-
-      if(insertSpliceInfoTuple(&splice_session_info) != 0)
-      {
-        pr_debug(MODULE_NAME": %s error with inserting tcp splice info tuple setsockopt\n",
-                 __func__);
-        return -EBADF;
-      }
-
-      pr_debug(MODULE_NAME": %s setsockopt tcpsplice successful\n", __func__);
-      break;
-    }
-    default:
-    {
-      pr_err(MODULE_NAME": %s error, wrong tcpsplice setsockopt\n",__func__);
-      return -EBADF;
-    }
-  }
-
-  return 0;
-
-}
-
 /***************************************************************************
 *
 * Function: insertSpliceInfoTuple
 *
 * Description: inserts tcp splice info into global hash table
 *
-* Parameters: struct tcp_splice_session_info* sp_session; //ptr to tcp splice session
+* Parameters: struct tcp_splice_session_info* sp_session; ptr to tcp splice session
 *
 * Return: 0, success
 *        -1, otherwise
@@ -285,7 +92,7 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
       conn_tuple[0].src.u.tcp.port = htons(sp_session->cli_socket->sk->sk_num);
       conn_tuple[0].dst.u3.ip = sp_session->cli_socket->sk->sk_daddr;
       conn_tuple[0].dst.u.tcp.port = sp_session->cli_socket->sk->sk_dport;
-      conn_tuple[0].dst.protonum = sp_session->cli_socket->sk->sk_protocol;
+      conn_tuple[0].dst.protonum = (unsigned char)sp_session->cli_socket->sk->sk_protocol;
       conn_tuple[0].dst.dir = IP_CT_DIR_ORIGINAL;
 #ifdef ISKERNELABOVE_4_9
       if((cli_conn_hash = nf_conntrack_find_get(sock_net(sp_session->cli_socket->sk),
@@ -325,16 +132,14 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
       memcpy((void*)&conn_tuple[0].dst.u3.in6,
              (void*)&sp_session->cli_socket->sk->sk_v6_daddr.in6_u, sizeof(struct in6_addr));
       conn_tuple[0].dst.u.tcp.port = sp_session->cli_socket->sk->sk_dport;
-      conn_tuple[0].dst.protonum = sp_session->cli_socket->sk->sk_protocol;
+      conn_tuple[0].dst.protonum = (unsigned char)sp_session->cli_socket->sk->sk_protocol;
       conn_tuple[0].dst.dir = IP_CT_DIR_ORIGINAL;
 #ifdef ISKERNELABOVE_4_9
-      if((cli_conn_hash = nf_conntrack_find_get(sock_net(sp_session->cli_socket->sk),
-                                            NF_CT_DEFAULT_ZONE_ID, &conn_tuple[0])) == NULL)
-      {
-        pr_debug(MODULE_NAME": %s couldn't find get the client socket conntrack hash\n",
-                 __func__);
-        return -EBADF;
-      }
+     if(( cli_conn_hash = nf_conntrack_find_get(sock_net(sp_session->cli_socket->sk), NF_CT_DEFAULT_ZONE_ID, &conn_tuple[0])) == NULL)
+     {
+       pr_debug(MODULE_NAME": %s couldn't find get the client socket conntrack hash\n",  __func__);
+       return -EBADF;
+     }
 #else
       if((cli_conn_hash = nf_conntrack_find_get(sock_net(sp_session->cli_socket->sk),
                                             NF_CT_DEFAULT_ZONE, &conn_tuple[0])) == NULL)
@@ -372,7 +177,7 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
       conn_tuple[1].src.u.tcp.port = htons(sp_session->req_socket->sk->sk_num);
       conn_tuple[1].dst.u3.ip = sp_session->req_socket->sk->sk_daddr;
       conn_tuple[1].dst.u.tcp.port = sp_session->req_socket->sk->sk_dport;
-      conn_tuple[1].dst.protonum = sp_session->req_socket->sk->sk_protocol;
+      conn_tuple[1].dst.protonum = (unsigned char)sp_session->req_socket->sk->sk_protocol;
       conn_tuple[1].dst.dir = IP_CT_DIR_ORIGINAL;
 #ifdef ISKERNELABOVE_4_9
       if((req_conn_hash = nf_conntrack_find_get(sock_net(sp_session->req_socket->sk),
@@ -414,7 +219,7 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
       memcpy((void*)&conn_tuple[1].dst.u3.in6,
              (void*)&sp_session->req_socket->sk->sk_v6_daddr.in6_u, sizeof(struct in6_addr));
       conn_tuple[1].dst.u.tcp.port = sp_session->req_socket->sk->sk_dport;
-      conn_tuple[1].dst.protonum = sp_session->req_socket->sk->sk_protocol;
+      conn_tuple[1].dst.protonum = (unsigned char) sp_session->req_socket->sk->sk_protocol;
       conn_tuple[1].dst.dir = IP_CT_DIR_ORIGINAL;
 #ifdef ISKERNELABOVE_4_9
       if((req_conn_hash = nf_conntrack_find_get(sock_net(sp_session->req_socket->sk),
@@ -725,14 +530,211 @@ int insertSpliceInfoTuple(struct tcp_splice_session_info* sp_session)
 
   return 0;
 }
+/***************************************************************************
+*
+* Function: listenFromUserspace
+*
+* Description: callback for listening to netlink msgs from userspace
+*
+* Parameters: struct sk_buff* skb; skb for netlink msg
+*
+* Return: none
+*
+***************************************************************************/
+void listenFromUserspace(struct sk_buff* skb)
+{
+  struct nlmsghdr* nlh;
 
+  if(skb == NULL)
+  {
+    pr_debug(MODULE_NAME": %s skb NULL!\n", __func__);
+    return;
+  }
+  nlh = nlmsg_hdr(skb);
+  if(nlh == NULL)
+  {
+	  pr_debug(MODULE_NAME ": %s nlmsg_hdr is NULL!\n", __func__);
+	  return;
+  }
+  pr_info(MODULE_NAME": %s received netlink msg from userspace pid: %u\n", __func__,
+          nlh->nlmsg_pid);
+
+  userspace_addr.nl_pid = nlh->nlmsg_pid;
+
+  return;
+}
+
+/***************************************************************************
+*
+* Function: sendToUserspace
+*
+* Description: send netlink msg to userspace that the socket pair fd has
+*              seen a FIN or RST
+*
+* Parameters: struct tcp_splice_hash_entry* hash_entry; socket pair fd
+*
+* Return: none
+*
+***************************************************************************/
+void sendToUserspace(struct tcp_splice_hash_entry* hash_entry)
+{
+  struct nlmsghdr* nlmhdr;
+  struct sk_buff* skb;
+  struct userspace_relay_session* data_ptr;
+
+  if(hash_entry == NULL)
+  {
+    pr_debug(MODULE_NAME": %s hash_entry NULL!\n", __func__);
+    return;
+  }
+
+  //allocate new skb, nlmsg_unicast takes care of the freeing
+  skb = nlmsg_new(sizeof(struct userspace_relay_session), GFP_ATOMIC);
+  if(skb == NULL)
+  {
+    pr_debug(MODULE_NAME": %s skb NULL!\n", __func__);
+    return;
+  }
+
+  //attach the payload to the skb
+  nlmhdr = nlmsg_put(skb, 0, 0, NLMSG_DONE, sizeof(struct userspace_relay_session), 0);
+  if(nlmhdr  == NULL)
+  {
+    pr_debug(MODULE_NAME": %s nlmhdr NULL!\n", __func__);
+    kfree_skb(skb);
+    return;
+  }
+
+  //we're not multicast
+  NETLINK_CB(skb).dst_group = 0;
+
+  //ptr to the head of the payload
+  data_ptr = (struct userspace_relay_session*)NLMSG_DATA(nlmhdr);
+  if(data_ptr == NULL)
+  {
+    pr_debug(MODULE_NAME": %s data_ptr NULL!\n", __func__);
+    kfree_skb(skb);
+    return;
+  }
+
+  *data_ptr = hash_entry->session_info.r_session;
+
+  if(nlmsg_unicast(nl_socket, skb, userspace_addr.nl_pid) < 0)
+  {
+    pr_err(MODULE_NAME": %s error sending netlink msg to userspace\n", __func__);
+  }
+
+  pr_debug(MODULE_NAME": %s notification of FIN socket pair sent to userspace\n",__func__);
+
+  return;
+}
+
+/***************************************************************************
+*
+* Function: tcp_splice_socket
+*
+* Description: callback for setsockopt SO_TCP_SPLICE
+*
+* Parameters: struct sock* sk; socket fd
+*             int optval; option value
+*             void __user *user; user data
+*             unsigned int len; option length
+*
+* Return: 0, success
+*        -1, otherwise
+*
+***************************************************************************/
+#ifdef ISKERNEL5_15
+int tcp_splice_socket(struct sock* sk, int optval, sockptr_t arg, unsigned int len)
+#else
+int tcp_splice_socket(struct sock* sk, int optval, void __user *user, unsigned int len)
+#endif
+{
+  int err = 0;
+  struct tcp_splice_session_info splice_session_info;
+
+  if(sk == NULL)
+  {
+    pr_err(MODULE_NAME": %s sock NULL!\n", __func__);
+    return -EINVAL;
+#ifdef ISKERNEL5_15
+  } else if(NULL == arg.user)
+#else
+  } else if(NULL == user)
+#endif
+  {
+    pr_err(MODULE_NAME": %s user NULL!\n", __func__);
+    return -EINVAL;
+  }
+
+  //not checking for capabilities of user
+  switch(optval)
+  {
+    case SO_TCP_SPLICE:
+    {
+      //copy_from_user and not using netlink socket because filling out the socket
+      //splice info needs to be scheduled now
+#ifdef ISKERNEL5_15
+      if(copy_from_user(&(splice_session_info.r_session), arg.user, len) != 0)
+#else
+      if(copy_from_user(&(splice_session_info.r_session), user, len) != 0)
+#endif
+      {
+        pr_err(MODULE_NAME": %s error copying from userspace\n", __func__);
+        return -EINVAL;
+      }
+
+      if((splice_session_info.cli_socket = sockfd_lookup(splice_session_info.r_session.cli_fd,
+                                                          &err)) == NULL)
+      {
+        pr_err(MODULE_NAME": %s error looking up client socket from given userspace fd: "
+              "%d\n", __func__, err);
+        return -EBADF;
+      }
+      sockfd_put(splice_session_info.cli_socket);
+
+      if((splice_session_info.req_socket = sockfd_lookup(splice_session_info.r_session.req_fd,
+                                                          &err)) == NULL)
+      {
+
+        pr_err(MODULE_NAME": %s error looking up req socket from given userspace fd: "
+              "%d\n", __func__, err);
+        return -EBADF;
+      }
+      sockfd_put(splice_session_info.req_socket);
+
+      if(debug_mode)
+      {
+        printSessionInfo(&splice_session_info);
+      }
+
+      if(insertSpliceInfoTuple(&splice_session_info) != 0)
+      {
+        pr_debug(MODULE_NAME": %s error with inserting tcp splice info tuple setsockopt\n",
+                 __func__);
+        return -EBADF;
+      }
+
+      pr_debug(MODULE_NAME": %s setsockopt tcpsplice successful\n", __func__);
+      break;
+    }
+    default:
+    {
+      pr_err(MODULE_NAME": %s error, wrong tcpsplice setsockopt\n",__func__);
+      return -EBADF;
+    }
+  }
+
+  return 0;
+
+}
 /***************************************************************************
 *
 * Function: printSessionInfo
 *
 * Description: prints tcp splice info
 *
-* Parameters: struct tcp_splice_session_info* sp_session; //ptr to tcp splice session
+* Parameters: struct tcp_splice_session_info* sp_session; ptr to tcp splice session
 *
 * Return: none
 *
@@ -834,9 +836,9 @@ void printSessionInfo(struct tcp_splice_session_info* sp_session)
 *
 * Description: Configures IPA with SOCKSv5 session info
 *
-* Parameters: struct tcp_splice_tuple splice_tuple //ptr to tcp splice tuple
-* struct tcp_splice_session_info *session_info //ptr to session info
-* unsigned int pdn_hash_key // pointer to pdn hash key to store in hash entry
+* Parameters: struct tcp_splice_tuple splice_tuple ptr to tcp splice tuple
+* struct tcp_splice_session_info *session_info ptr to session info
+* unsigned int pdn_hash_key pointer to pdn hash key to store in hash entry
 *
 * Return: ipa handle
 *
@@ -1089,7 +1091,7 @@ int AddIPASOCKSSession(struct tcp_splice_tuple *splice_tuple,
 *
 * Description: Configures IPA with SOCKSv5 session info
 *
-* Parameters: struct tcp_splice_tuple splice_tuple; //ptr to tcp splice tuple
+* Parameters: struct tcp_splice_tuple splice_tuple; ptr to tcp splice tuple
 *
 * Return: void
 *
