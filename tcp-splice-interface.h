@@ -34,7 +34,7 @@
 
 #define MODULE_NAME "Code Aurora TCP Splice"
 
-#define NETLINK_QC_SOCKSIFY 24
+#define NETLINK_QC_SOCKSIFY 25
 
 #define SO_TCP_SPLICE 8345 //for setsockopt
 
